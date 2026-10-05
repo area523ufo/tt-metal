@@ -39,9 +39,12 @@ internal error writes nothing, however many grids were complete), no test in it 
 and every touched `(in, out)` grid is complete — but it is still a deliberate act, so
 read the diff before committing it. Off Wormhole it refuses at startup, before
 anything compiles. The producer half only compiles, and `--collect-only` runs nothing,
-so both write nothing and say so. An op whose block it cannot regenerate (a floor row
-or an op-wide `atol`/`rtol` row on a measured cell) is kept verbatim and named in the
-summary; the session still passes, so a whole-table emit can end green.
+so both write nothing and say so. An op whose block it cannot regenerate (an op-wide
+`atol`/`rtol` row on a measured cell, or an alias) is kept verbatim and named in the
+summary with why; the session still passes, so a whole-table emit can end green. Each
+refusal is its own exception type (`WrongArch`, `SessionNotClean`, `IncompleteGrid`,
+`AmbiguousCollapse`, `UnplacedMeasurements`), and a successful emit returns a
+`WriteReport` that the one-line summary is rendered from.
 
 ## Why a step budget rather than a tolerance
 
@@ -230,16 +233,19 @@ Re-run without `--ulp-emit`. Green means the budgets in the table hold over ever
 of a 16-bit input and over the `Float32` stride. Then run the host guards, which check things the sweep cannot:
 
 ```bash
-pytest test_sfpu_accuracy_budget.py test_ulp_sweep.py -q
+pytest test_sfpu_accuracy_budget.py test_ulp_sweep.py test_ulp_provenance.py -q
 ```
 
 ## The rules the table enforces
 
 - **No number is a guess.** The trailing comment on a row is the measurement it came
   from. A budget may only be *raised* by re-measuring and updating that comment in the
-  same change. From #57527, `llk-sfpu-ulp-budget-guard` reports, on the pull request,
-  every cell a change loosens and whether its row was re-measured; it is advisory, and
-  approving a raise is the table's code owners' review.
+  same change. Code reads the comment only through `ulp_provenance.Provenance.parse`,
+  and writes it only through `Provenance.render`: a note that is not exactly what
+  `render` writes reads as hand-written, so rewording one cannot leave a guard
+  half-matching it. From #57527, `llk-sfpu-ulp-budget-guard` reports, on the pull
+  request, every cell a change loosens and whether its row was re-measured; it is
+  advisory, and approving a raise is the table's code owners' review.
 - **Most specific key wins.** A row's key fields are `in`, `out`, `approx`, `dest` and
   `arch`, all optional. Two rows matching one variant equally specifically are an
   authoring error, not a tie-break, and the loader refuses them.
@@ -329,4 +335,5 @@ the floor it would have needed.
 | `python_tests/helpers/ulp_sweep.py` | what the sweep feeds, what it masks, and the emitter |
 | `python_tests/helpers/sfpu_accuracy_budget.yaml` | the table |
 | `python_tests/helpers/sfpu_accuracy_budget.py` | how a row is resolved |
+| `python_tests/helpers/ulp_provenance.py` | the table read as rows and provenance: the one parser and renderer of its comments |
 | `python_tests/helpers/ulp_budget_diff.py` | the CI comparison, and the headroom report (from #57527) |
