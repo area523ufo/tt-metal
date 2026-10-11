@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
-"""Dropout with a deterministic outcome: probability 0 keeps every element, INT_MAX drops every one,
-with and without the eltwise binary init that add_tiles before dropout leaves, and on Blackhole also
-as the one 32-row call per tile that dropout_tile issues there."""
+"""Dropout with a deterministic outcome (keep all or drop all), with and without a preceding binary init."""
 
 import torch
 from helpers.chip_architecture import ChipArchitecture, get_chip_architecture
@@ -25,7 +23,6 @@ PROBABILITY_DROP_ALL = 0x7FFFFFFF
 SCALE_ONE = 0x3F800000
 SCALE_TWO = 0x40000000
 
-# (probability, scale as fp32 bits)
 CASES = [
     (PROBABILITY_KEEP_ALL, SCALE_ONE),
     (PROBABILITY_KEEP_ALL, SCALE_TWO),
@@ -43,7 +40,6 @@ def _golden(src, probability, scale_bits):
 def _run(formats, dest_acc, binary_init_before, one_call, probability, scale_bits):
     torch.manual_seed(0)
     torch_format = format_dict[formats.input_format]
-    # Non-zero values in [1, 2): a dropped, misplaced or unscaled element shows, the doubling is exact.
     src_A = (
         torch.empty(NUM_TILES * ELEMENTS_PER_TILE, dtype=torch.float32)
         .uniform_(1.0, 2.0)

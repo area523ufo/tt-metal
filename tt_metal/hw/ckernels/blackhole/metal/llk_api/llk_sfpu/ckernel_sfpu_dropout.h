@@ -30,7 +30,7 @@ inline void calculate_dropout(uint probability, uint scale) {
         // Scale samples
         // dst_reg[0] = dst_reg[0] * sFloat16b(scale);
         ///////////////////////
-        // ADDR_MOD_7 is the record the SFPU inits program (zero DEST step); record 3 belongs to the FPU inits.
+        // ADDR_MOD_7 (zero DEST step) is the SFPU init's record; record 3 is the FPU's.
         TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::DEFAULT, ADDR_MOD_7, 0);
         TTI_SFPMUL(p_sfpu::LREG0, p_sfpu::LREG1, p_sfpu::LCONST_0, p_sfpu::LREG0, 0);
 

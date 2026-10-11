@@ -2,9 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Driver for calculate_dropout (llk_sfpu/ckernel_sfpu_dropout.h) with a deterministic outcome: probability 0 keeps
-// every element, INT_MAX drops every one. DROPOUT_BINARY_INIT_BEFORE runs the eltwise binary init before the body,
-// DROPOUT_ONE_CALL issues the tile as one 32-row call, as the Blackhole dropout_tile does.
+// Driver for calculate_dropout with a deterministic outcome: probability 0 keeps every element, INT_MAX drops every one.
 
 #include <cstdint>
 
@@ -12,7 +10,6 @@
 #include "llk_defs.h"
 #include "params.h"
 
-// Globals required by the test framework.
 std::uint32_t unp_cfg_context          = 0;
 std::uint32_t pack_sync_tile_dst_ptr   = 0;
 std::uint32_t math_sync_tile_dst_index = 0;
@@ -67,7 +64,6 @@ void run_kernel(RUNTIME_PARAMETERS params)
     _llk_math_eltwise_unary_datacopy_init_wrapper_<DataCopyType::A2D, is_fp32_dest_acc_en, BroadcastType::NONE, false /* is_int_fpu_en */, PackMode::Default>(
         TILE_NUM_FACES, formats.math);
 
-    // dropout_kernel_init: the unary SFPU init for the dropout op and the PRNG seed.
     _llk_math_eltwise_unary_sfpu_init_<SfpuType::dropout>();
     sfpu::dropout_init<false /*APPROXIMATION_MODE*/>(DROPOUT_SEED);
 
@@ -80,7 +76,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
 
         if constexpr (DROPOUT_BINARY_INIT_BEFORE)
         {
-            // The previous tile's binary init replaced the datacopy MOP and address modifiers.
+            // The previous binary init replaced the datacopy MOP and address modifiers.
             _llk_math_eltwise_unary_datacopy_init_wrapper_<
                 DataCopyType::A2D,
                 is_fp32_dest_acc_en,
@@ -93,7 +89,6 @@ void run_kernel(RUNTIME_PARAMETERS params)
 
         if constexpr (DROPOUT_BINARY_INIT_BEFORE)
         {
-            // The init alone reprograms the address modifiers; no binary instruction is issued.
             _llk_math_eltwise_binary_init_<EltwiseBinaryType::ELWADD, BroadcastType::NONE>(
                 ckernel::make_tensor_shape_from_legacy(FACE_R_DIM, TILE_NUM_FACES), 0 /* acc_to_dest */);
         }
