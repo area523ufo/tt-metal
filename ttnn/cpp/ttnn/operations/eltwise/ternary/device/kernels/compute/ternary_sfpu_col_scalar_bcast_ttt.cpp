@@ -13,8 +13,7 @@
 #include "api/dataflow/dataflow_buffer.h"
 #include "ttnn/operations/eltwise/ternary/device/kernels/compute/ternary_sfpu_copy_init.hpp"
 
-// With the three operands in c_0's formats the inits run once: c_0's copy init serves all three, and the copies leave
-// the SFPU address modes, programmable constants and replay buffer as the op init set them.
+// Operands in c_0's formats share its copy init, which leaves the SFPU state the op init set, so the inits run once.
 #if defined(ARCH_BLACKHOLE) && (defined(TRISC_UNPACK) || defined(TRISC_MATH))
 constexpr bool init_once = unpack_src_format[tt::CBIndex::c_0] == static_cast<std::uint32_t>(DataFormat::Float16_b) &&
                            copy_init_shared_with_c0<tt::CBIndex::c_1>() && copy_init_shared_with_c0<tt::CBIndex::c_2>();

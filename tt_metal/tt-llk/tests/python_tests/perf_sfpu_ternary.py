@@ -249,7 +249,7 @@ def test_perf_sfpu_snake_beta(
     ],
     loop_factor=[16],
     iterations=[32],
-    input_dimensions=[[128, 64]],  # tile_cnt: 8
+    input_dimensions=[[128, 64]],
 )
 def test_perf_sfpu_where(
     perf_report,

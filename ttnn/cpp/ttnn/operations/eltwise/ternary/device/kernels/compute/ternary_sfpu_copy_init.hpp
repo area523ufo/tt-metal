@@ -7,7 +7,6 @@
 #include <cstdint>
 
 #if defined(ARCH_BLACKHOLE)
-// The copy init of c_0 serves an operand that shares its formats and tile geometry.
 template <uint32_t cb>
 constexpr bool copy_init_shared_with_c0() {
 #if defined(TRISC_UNPACK) || defined(TRISC_MATH)

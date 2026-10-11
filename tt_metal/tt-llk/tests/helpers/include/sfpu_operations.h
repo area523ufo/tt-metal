@@ -2398,8 +2398,7 @@ void call_ternary_sfpu_operation(
     ckernel::VectorMode vector_mode   = ckernel::VectorMode::RC)
 {
 #if defined(ARCH_BLACKHOLE)
-    // ITERATIONS is the rows per face. A full tile of where, addcmul, addcdiv or lerp runs as one 32-row call on
-    // Blackhole, as their compute API entry points issue it; a partial tile runs per face.
+    // Blackhole's where, addcmul, addcdiv and lerp entry points issue a full tile as one 32-row call.
     constexpr bool one_call =
         ITERATIONS == 8 && (OPERATION == SfpuType::where || OPERATION == SfpuType::addcmul || OPERATION == SfpuType::addcdiv || OPERATION == SfpuType::lerp);
     if constexpr (one_call)
