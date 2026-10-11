@@ -2,8 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// situ_glu.cpp with the activation on the pack thread; the math thread only copies the gate and up tiles.
-//   compile_time_args = [num_tiles, dst_out_index]
+// situ_glu.cpp with the activation on the pack thread.
 
 #include <cstdint>
 
@@ -41,7 +40,7 @@ void kernel_main() {
         copy_tile(cb_up, 0, kDstUp);
         tile_regs_commit();
 
-        // Hold the SFPU frame, which starts with a DST offset configuration write, until the math thread is done.
+        // The SFPU frame starts with a DST offset configuration write, so it waits for the math thread.
         PACK(TTI_SEMWAIT(
             p_stall::STALL_TDMA | p_stall::STALL_CFG | p_stall::STALL_SFPU,
             semaphore::t6_sem(semaphore::MATH_PACK),

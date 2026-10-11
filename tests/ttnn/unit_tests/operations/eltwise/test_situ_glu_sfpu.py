@@ -171,7 +171,7 @@ def test_situ_glu_sfpu(device, in_name, fp32_dest, dst_out):
 @pytest.mark.parametrize("fp32_dest", [False, True], ids=["bf16_dst", "fp32_dst"])
 @pytest.mark.parametrize("dst_out", [0, 2], ids=["out_aliases_gate", "out_separate"])
 def test_situ_glu_sfpu_pack_thread(device, in_name, fp32_dest, dst_out):
-    """situ_glu_tile_pack runs the body of situ_glu_tile on the pack thread: the same bits."""
+    """The pack-thread variant gives the same bits."""
     in_dtype, page_bytes = IN_DTYPES[in_name]
     gate_t, up_t = _coverage_inputs(8)
 
