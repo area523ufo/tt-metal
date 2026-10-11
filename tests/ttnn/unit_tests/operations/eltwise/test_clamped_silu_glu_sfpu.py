@@ -40,8 +40,7 @@ BF16_PCC = 0.999
 BFP8_PCC = 0.99
 
 
-# (gate, up, out) dst placements; "production" mirrors the fused call BINARY_ACT_TILE(j, c + j, j).
-# Every index stays under 4: fp32 dest accumulate holds only 4 dst tiles, and both modes run here.
+# (gate, up, out) dst placements; indices stay under 4 because fp32 dest accumulate holds only 4 dst tiles.
 DST_PLACEMENTS = [
     pytest.param(0, 1, 0, id="out_aliases_gate"),
     pytest.param(0, 1, 2, id="out_separate"),
@@ -193,7 +192,7 @@ def test_clamped_silu_glu_sfpu(device, in_name, fp32_dest, dst_gate, dst_up, dst
 @pytest.mark.parametrize("fp32_dest", [False, True], ids=["bf16_dst", "fp32_dst"])
 @pytest.mark.parametrize("dst_gate, dst_up, dst_out", DST_PLACEMENTS)
 def test_clamped_silu_glu_sfpu_pack_thread(device, in_name, fp32_dest, dst_gate, dst_up, dst_out):
-    """clamped_silu_glu_tile_pack runs the body of clamped_silu_glu_tile on the pack thread: the same bits."""
+    """The pack-thread variant gives the same bits."""
     in_dtype, page_bytes = IN_DTYPES[in_name]
     gate_t, up_t = _coverage_inputs(8)
 
