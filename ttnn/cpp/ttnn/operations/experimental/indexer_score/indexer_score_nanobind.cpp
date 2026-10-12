@@ -183,6 +183,10 @@ void bind_indexer_score(nb::module_& mod) {
                 scores (and the block-max-pool, which pools token-contiguous blocks)
                 come out correct. Unset = contiguous K.
 
+        sub_core_grids: one rectangle of worker cores the banded schedule is planned over (default: the
+            whole compute grid), e.g. a compute sub-device while a collective runs on the other cores. The
+            scores do not depend on it.
+
         Returns: score [B, num_groups, Sq, T_out] bf16 row-major (T_out = T, or
             T/block_size when block-max-pooling); future/pad columns/blocks -inf.
         )doc",
@@ -200,7 +204,8 @@ void bind_indexer_score(nb::module_& mod) {
         nb::arg("kv_len") = std::nullopt,
         nb::arg("seq_shard_axes") = std::nullopt,
         nb::arg("block_cyclic_sp_axis") = std::nullopt,
-        nb::arg("block_cyclic_chunk_local") = std::nullopt);
+        nb::arg("block_cyclic_chunk_local") = std::nullopt,
+        nb::arg("sub_core_grids") = std::nullopt);
 
     ttnn::bind_function<"ring_indexer_score_dsa", "ttnn.experimental.">(
         mod,
