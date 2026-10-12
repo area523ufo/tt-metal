@@ -175,6 +175,7 @@ def attention_forward(
             pipelined = msa_segments_pipelined(
                 [pres[i] for i in warm],
                 kv_cache=kv_cache,
+                layer_idx=layer_idx,
                 mesh_config=mesh_config,
                 ccl_manager=ccl_manager,
                 scale=config.head_dim**-0.5,

@@ -545,10 +545,12 @@ def msa_segments_overlap_possible(segments, kv_cache, ccl_manager):
     return True
 
 
-def msa_segments_pipelined(segments, *, kv_cache, mesh_config, ccl_manager, scale, block_size, topk_blocks, num_groups):
+def msa_segments_pipelined(
+    segments, *, kv_cache, layer_idx, mesh_config, ccl_manager, scale, block_size, topk_blocks, num_groups
+):
     """The warm segments' MSA chains with the next segment's cache gather overlapped under this segment's
-    block selection and sparse attention. ``segments``: objects with ``q`` (tiled), ``index_q``, ``slot``,
-    ``cached_len``, ``s_local``, in forward order. Returns the row-major attention outputs in that order.
+    block selection and sparse attention. ``segments``: objects with ``q`` (tiled), ``index_q``, the user
+    ``slot`` whose cache layer ``layer_idx`` is read, ``cached_len``, ``s_local``, in forward order. Returns the row-major attention outputs in that order.
 
     Schedule, with G(i) = segment i's K/V/index_k gather (gather sub-device, buffer set i % 2) and C(i) = its
     indexer -> top-k -> sparse_sdpa_msa (compute sub-device):
@@ -581,7 +583,7 @@ def msa_segments_pipelined(segments, *, kv_cache, mesh_config, ccl_manager, scal
         with zone(f"gather{i}", FINE):
             return msa_cache_gather(
                 kv_cache,
-                slot=s.slot,
+                slot=s.slot * kv_cache.num_layers + layer_idx,
                 mesh_config=mesh_config,
                 ccl_manager=ccl_manager,
                 cached_len=s.cached_len,
