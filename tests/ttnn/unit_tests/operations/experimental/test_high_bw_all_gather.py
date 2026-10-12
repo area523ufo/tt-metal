@@ -1542,6 +1542,20 @@ def _sparse_mla_overlap_grids(mesh_device):
     return topk_grid, gather_grid
 
 
+def _msa_overlap_grids(mesh_device):
+    """The MiniMax-M3 packed-prefill carve (tt/ccl.py MSA_GATHER_ROWS): the bottom two rows gather, the rows
+    above compute."""
+    grid = mesh_device.compute_with_storage_grid_size()
+    compute_grid = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(grid.x - 1, grid.y - 3))])
+    gather_grid = ttnn.CoreRangeSet(
+        [ttnn.CoreRange(ttnn.CoreCoord(0, grid.y - 2), ttnn.CoreCoord(grid.x - 1, grid.y - 1))]
+    )
+    needed = _NUM_LINKS * 2 * (4 + 1)  # the 4-worker tier: 4 workers + 1 mux per direction per link
+    if gather_grid.num_cores() < needed:
+        pytest.skip(f"a two-row strip of {gather_grid.num_cores()} cores holds no 4-worker tier ({needed} needed)")
+    return compute_grid, gather_grid
+
+
 def _right_strip_subdevice_manager(mesh_device, owned_cores):
     """Build an isolated gather strip of exactly ``owned_cores`` on each chip.
 
@@ -2451,14 +2465,16 @@ def test_high_bw_all_gather_cached_link_discovery(mesh_device, num_links, expect
 
 @run_for_blackhole("sub-device gather/compute overlap requires Blackhole fabric")
 @pytest.mark.parametrize("device_params", [_FABRIC_2D_LINE_DEVICE_PARAMS], indirect=True)
-def test_high_bw_all_gather_segment_pipeline_matches_serial(mesh_device):
+@pytest.mark.parametrize("carve", [_sparse_mla_overlap_grids, _msa_overlap_grids], ids=["mla_columns", "m3_rows"])
+def test_high_bw_all_gather_segment_pipeline_matches_serial(mesh_device, carve):
     """Gather slot i+1 on the gather sub-device while a top-k on the other sub-device consumes gather i, the two
     joined by a device-side event before each top-k: the MiniMax-M3 packed-prefill MSA schedule (G(0); for i:
-    join; C(i); G(i+1)) over two output buffers that alternate by parity. Every top-k ranks the rows its segment
-    gathered, so a join that let it start before its gather landed, or a gather that overwrote the buffer a top-k
-    was still reading, would rank stale rows; the pipeline must equal the serial schedule and the host."""
+    join; C(i); G(i+1)) over two output buffers that alternate by parity, on the sparse-MLA column carve and on
+    M3's two-row gather strip. Every top-k ranks the rows its segment gathered, so a join that let it start
+    before its gather landed, or a gather that overwrote the buffer a top-k was still reading, would rank stale
+    rows; the pipeline must equal the serial schedule and the host."""
     rank_line, cluster_axis = _rank_line_mesh(mesh_device)
-    topk_grid, gather_grid = _sparse_mla_overlap_grids(rank_line)
+    topk_grid, gather_grid = carve(rank_line)
     manager = rank_line.create_sub_device_manager([ttnn.SubDevice([topk_grid]), ttnn.SubDevice([gather_grid])], 0)
     ready_semaphore, data_valid_semaphore = _make_l1_small_semaphore_pair(rank_line, gather_grid)
     ttnn.synchronize_device(rank_line)
