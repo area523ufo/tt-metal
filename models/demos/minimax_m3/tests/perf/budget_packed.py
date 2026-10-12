@@ -27,6 +27,9 @@ Env:
   BUDGET_DUMP_KV     directory: after the last composition, save each slot's [k, v, index_k] (torch)
   BUDGET_REFERENCE   1 -> run each segment alone on the plain path (see above)            [default 0]
   BUDGET_TOPK_DUMP   file: record the MSA top-k block ids of one extra forward of the last composition
+  BUDGET_PROFILE     1 -> zone-profile one extra forward of the last composition (run under
+                     `python3 -m tracy -v -r -p`; zones as for profile_prefill.py, root `profiled_chunk`,
+                     per-layer profiler reads outside the profiled forward only)                [default 0]
   BUDGET_STAGES / BUDGET_STAGE, BUDGET_TOKENS, M3_FABRIC, EXPERT_DTYPE, HF_MODEL, TT_CACHE_PATH as
   for budget_sweep.py.
 """
@@ -37,6 +40,12 @@ import resource
 import statistics
 import sys
 import time
+
+# The zone flags are read when the model modules are imported (utils/profiler_utils), so they go first.
+PROFILE = os.getenv("BUDGET_PROFILE", "0") == "1"
+if PROFILE:
+    os.environ.setdefault("M3_PROFILE_ZONES", "1")
+    os.environ.setdefault("TT_METAL_DEVICE_PROFILER", "1")
 
 import ttnn
 from models.demos.minimax_m3.tt.ccl import L1_SMALL_SIZE
@@ -155,6 +164,19 @@ def main():
             mesh, layer_ids, B * SEG, None if reference else SEG, capacity, n_slots + 1, stages, stage
         )
         emit(kind="built", load_s=round(time.perf_counter() - t0, 1), mesh=list(mesh.shape))
+        if PROFILE:
+            from models.demos.minimax_m3.utils.profiler_utils import COARSE, read_profiler, zone
+
+            # Drain the device profiler after every layer of the un-profiled forwards (fills, warm-ups, timed
+            # iterations); inside the profiled forward the buffer must hold the whole forward (see
+            # profile_prefill.py, TT_METAL_PROFILER_PROGRAM_SUPPORT_COUNT).
+            state = {"in_profiled": False}
+
+            def on_layer_complete(layer_idx):
+                if not state["in_profiled"]:
+                    read_profiler(mesh)
+
+            runtime._on_layer_complete = on_layer_complete
 
         def run(segs):
             """segs: [(slot, stream, h, n)] -> wall ms of the forward(s), synced at the end only."""
@@ -231,6 +253,15 @@ def main():
                 {"ids": captured, "reference": reference, "segments": [(h, n) for _, _, h, n in segs]}, topk_dump
             )
             emit(kind="topk_dumped", path=topk_dump, calls=len(captured))
+
+        if PROFILE:
+            # One extra untimed forward of the last composition under the root zone the parser reports.
+            state["in_profiled"] = True
+            with zone("profiled_chunk", COARSE):
+                run(compos[-1][2])
+            state["in_profiled"] = False
+            read_profiler(mesh)
+            emit(kind="profiled", compo=compos[-1][0], spec=compos[-1][1])
 
         if dump:
             import torch

@@ -15,6 +15,9 @@ that is what excludes the warmup and cache-prefix chunks, whose ops are in the s
 
 Per zone it reports, for each device separately and then across devices:
   * device-kernel time  (sum of DEVICE KERNEL DURATION [ns])
+  * span: the wall the zone's ops occupied on the device (last FW end - first FW start, from the FW cycle
+    columns). Equal to the kernel sum when the ops ran back to back; shorter when ops of the zone ran
+    concurrently on sub-devices, which is how an overlap shows up (the kernel sum never shrinks)
   * op count
   * bytes moved (in + out, from the per-op shape/dtype columns) and the implied GB/s
   * DRAM BW UTIL (%) / NOC UTIL (%) means when the run used --collect-noc-traces
@@ -54,7 +57,11 @@ DTYPE_BYTES = {
 }
 
 BASE_COLS = ["OP CODE", "OP TYPE", "DEVICE ID", DURATION_COL, "CORE COUNT"]
+FW_START_COL, FW_END_COL, FW_DURATION_COL = "DEVICE FW START CYCLE", "DEVICE FW END CYCLE", "DEVICE FW DURATION [ns]"
 OPTIONAL_COLS = [
+    FW_START_COL,
+    FW_END_COL,
+    FW_DURATION_COL,
     "DRAM BW UTIL (%)",
     "NOC UTIL (%)",
     "NPE CONG IMPACT (%)",
@@ -148,7 +155,11 @@ class ZoneAccumulator:
     def __init__(self):
         self.stack = []  # list of zone names, outermost first
         # (zone_path, device_id) -> stats
-        self.stats = defaultdict(lambda: {"ns": 0.0, "ops": 0, "bytes": 0.0, "dram": [], "noc": []})
+        self.stats = defaultdict(
+            lambda: {"ns": 0.0, "ops": 0, "bytes": 0.0, "dram": [], "noc": [], "t0": None, "t1": None}
+        )
+        # device -> (fw cycles, fw ns) sums: the clock that turns a cycle span into ns.
+        self.clock = defaultdict(lambda: [0.0, 0.0])
         # relative zone path -> op_code -> device -> ns. Keyed on the layer-relative path (the layer
         # index stripped) so the 57 sparse layers collapse into one row per zone, and kept per device
         # so the report can quote the worst device rather than a meaningless all-device sum.
@@ -237,6 +248,17 @@ class ZoneAccumulator:
         nbytes = row_bytes(row, byte_cols)
         dram = row.get("DRAM BW UTIL (%)")
         noc = row.get("NOC UTIL (%)")
+        t0 = t1 = None
+        try:
+            t0, t1 = float(row.get(FW_START_COL)), float(row.get(FW_END_COL))
+            fw_ns = float(row.get(FW_DURATION_COL))
+            if t1 > t0 and fw_ns > 0:
+                self.clock[dev][0] += t1 - t0
+                self.clock[dev][1] += fw_ns
+            else:
+                t0 = t1 = None
+        except (TypeError, ValueError):
+            t0 = t1 = None
         # Charge to the innermost zone and every enclosing one, so a parent's total always covers
         # its children plus whatever ops it ran directly.
         for depth in range(1, len(self.stack) + 1):
@@ -245,6 +267,9 @@ class ZoneAccumulator:
             s["ns"] += dur
             s["ops"] += 1
             s["bytes"] += nbytes
+            if t0 is not None:
+                s["t0"] = t0 if s["t0"] is None else min(s["t0"], t0)
+                s["t1"] = t1 if s["t1"] is None else max(s["t1"], t1)
             if dram is not None and not pd.isna(dram):
                 s["dram"].append(float(dram))
             if noc is not None and not pd.isna(noc):
@@ -259,12 +284,14 @@ def summarize(acc):
     per_zone = defaultdict(dict)
     for (zone, dev), s in acc.stats.items():
         per_zone[zone][dev] = s
+    ns_per_cycle = {dev: (ns / cyc if cyc else 0.0) for dev, (cyc, ns) in acc.clock.items()}
 
     out = {}
     for zone, devs in per_zone.items():
         ns = [d["ns"] for d in devs.values()]
         mx, mn = max(ns), min(ns)
         worst = max(devs, key=lambda d: devs[d]["ns"])
+        spans = [(d["t1"] - d["t0"]) * ns_per_cycle.get(dev, 0.0) for dev, d in devs.items() if d["t0"] is not None]
         # Bytes/GB-s are reported on the worst device: that is the chip setting the wall clock.
         wb = devs[worst]["bytes"]
         gbs = (wb / (mx / 1e9) / 1e9) if mx > 0 else 0.0
@@ -282,6 +309,8 @@ def summarize(acc):
             "gbs": gbs,
             "dram_util": (sum(dram) / len(dram)) if dram else None,
             "noc_util": (sum(noc) / len(noc)) if noc else None,
+            "span_ms_max": (max(spans) / 1e6) if spans else None,
+            "span_ms_mean": (sum(spans) / len(spans) / 1e6) if spans else None,
         }
     return out
 
@@ -391,16 +420,17 @@ def print_report(summary, by_class, acc, top=0):
         first_idx = layer_class(zones[0])[2]
         print()
         print(f"--- first {want} layer (layer {first_idx}) ---")
-        print(f"  {'zone':<44} {'ms':>8} {'skew ms':>8} {'ops':>6} {'MiB':>9} {'GB/s':>8} {'DRAM%':>7}")
-        print(f"  {'-'*44} {'-'*8} {'-'*8} {'-'*6} {'-'*9} {'-'*8} {'-'*7}")
+        print(f"  {'zone':<44} {'ms':>8} {'span ms':>8} {'skew ms':>8} {'ops':>6} {'MiB':>9} {'GB/s':>8} {'DRAM%':>7}")
+        print(f"  {'-'*44} {'-'*8} {'-'*8} {'-'*8} {'-'*6} {'-'*9} {'-'*8} {'-'*7}")
         for z in zones:
             if layer_class(z)[2] != first_idx:
                 continue
             s = summary[z]
             rel = "/".join(z.split("/")[1:])
             du = f"{s['dram_util']:.1f}" if s["dram_util"] is not None else "-"
+            span = f"{s['span_ms_max']:.3f}" if s.get("span_ms_max") is not None else "-"
             print(
-                f"  {rel:<44} {s['ms_max']:>8.3f} {s['skew_ms']:>8.3f} {s['ops']:>6} "
+                f"  {rel:<44} {s['ms_max']:>8.3f} {span:>8} {s['skew_ms']:>8.3f} {s['ops']:>6} "
                 f"{s['mib']:>9.1f} {s['gbs']:>8.1f} {du:>7}"
             )
 
