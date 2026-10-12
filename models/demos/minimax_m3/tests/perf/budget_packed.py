@@ -28,8 +28,8 @@ Env:
   BUDGET_REFERENCE   1 -> run each segment alone on the plain path (see above)            [default 0]
   BUDGET_TOPK_DUMP   file: record the MSA top-k block ids of one extra forward of the last composition
   BUDGET_PROFILE     1 -> zone-profile one extra forward of the last composition (run under
-                     `python3 -m tracy -v -r -p`; zones as for profile_prefill.py, root `profiled_chunk`,
-                     per-layer profiler reads outside the profiled forward only)                [default 0]
+                     `python3 -m tracy -v -r -p`; zones as for profile_prefill.py, root `profiled_chunk`;
+                     the profiler is drained every BUDGET_PROFILE_READ_EVERY [16] forwards outside it) [default 0]
   BUDGET_STAGES / BUDGET_STAGE, BUDGET_TOKENS, M3_FABRIC, EXPERT_DTYPE, HF_MODEL, TT_CACHE_PATH as
   for budget_sweep.py.
 """
@@ -167,13 +167,18 @@ def main():
         if PROFILE:
             from models.demos.minimax_m3.utils.profiler_utils import COARSE, read_profiler, zone
 
-            # Drain the device profiler after every layer of the un-profiled forwards (fills, warm-ups, timed
-            # iterations); inside the profiled forward the buffer must hold the whole forward (see
-            # profile_prefill.py, TT_METAL_PROFILER_PROGRAM_SUPPORT_COUNT).
-            state = {"in_profiled": False}
+            # Drain the device profiler during the un-profiled forwards (fills, warm-ups, timed iterations) so its
+            # buffer never overflows before the profiled forward, which must fit in it whole (profile_prefill.py,
+            # TT_METAL_PROFILER_PROGRAM_SUPPORT_COUNT). A drain is a multi-second mesh read, so not per layer:
+            # once per BUDGET_PROFILE_READ_EVERY forwards (a packed 2-layer forward is a few hundred ops).
+            state = {"in_profiled": False, "layers": 0}
+            read_every = int(os.getenv("BUDGET_PROFILE_READ_EVERY", "16")) * len(layer_ids)
 
             def on_layer_complete(layer_idx):
-                if not state["in_profiled"]:
+                if state["in_profiled"]:
+                    return
+                state["layers"] += 1
+                if state["layers"] % read_every == 0:
                     read_profiler(mesh)
 
             runtime._on_layer_complete = on_layer_complete
@@ -255,7 +260,9 @@ def main():
             emit(kind="topk_dumped", path=topk_dump, calls=len(captured))
 
         if PROFILE:
-            # One extra untimed forward of the last composition under the root zone the parser reports.
+            # One extra untimed forward of the last composition under the root zone the parser reports, into a
+            # freshly drained buffer.
+            read_profiler(mesh)
             state["in_profiled"] = True
             with zone("profiled_chunk", COARSE):
                 run(compos[-1][2])
