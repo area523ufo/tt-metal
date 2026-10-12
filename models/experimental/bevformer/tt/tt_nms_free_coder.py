@@ -5,16 +5,16 @@
 """TTNN port of BEVFormer's NMS-free box coder, from UniAD's ``TtNMSFreeCoder``
 (``models/experimental/uniad/tt/ttnn_nms_free_coder.py``).
 
-The top-k selection, the box decoding, the ``post_center_range`` test and upstream
-``BEVFormerHead.get_bboxes``' move of z to the box's bottom face run on device, on fixed
-``(bs, max_num)`` tensors, with the range test as a validity mask. Only dropping the invalid boxes
+The top-k selection, the box decoding, the ``post_center_range`` and ``score_threshold`` tests
+and upstream ``BEVFormerHead.get_bboxes``' move of z to the box's bottom face run on device, on
+fixed ``(bs, max_num)`` tensors, with the tests as a validity mask. Only dropping the invalid boxes
 runs on host (:meth:`TtNMSFreeCoder.compact`): it leaves a data-dependent number of boxes, which no
-device tensor can hold, as ttnn shapes, and a trace's, are fixed. For BEVFormer-base it drops none:
-the head scales the centers into ``pc_range``, inside ``post_center_range``.
-
-Upstream's ``score_threshold`` is not ported: no BEVFormer config sets it, and its fallback, which
-lowers the threshold by 10% at a time until some score passes, depends on the scores.
+device tensor can hold, as ttnn shapes, and a trace's, are fixed. For BEVFormer-base, which sets no
+score threshold, it drops none: the head scales the centers into ``pc_range``, inside
+``post_center_range``.
 """
+
+import torch
 
 import ttnn
 from models.experimental.bevformer.model_config import (
@@ -67,11 +67,25 @@ class TtNMSFreeCoder:
         score_threshold=None,
         num_classes=NUM_CLASSES,
     ):
-        if score_threshold is not None:
-            raise NotImplementedError("TtNMSFreeCoder has no score_threshold; see the module docstring")
         self.post_center_range = post_center_range
+        # Upstream tests the threshold for truth, so 0.0 applies none.
+        self.score_threshold = score_threshold or None
+        # Upstream's fallback when no score passes the threshold: it lowers the threshold by 10%
+        # at a time and stops at the first one some score reaches, or lets every score pass once
+        # it drops below 0.01. The thresholds depend on score_threshold only, so they are
+        # computed here, by upstream's own float arithmetic, and the 0.0 that ends them stands
+        # for "every score passes", as sigmoid scores are never negative.
+        self._fallback = []
+        if self.score_threshold is not None:
+            threshold = self.score_threshold
+            while True:
+                threshold *= 0.9
+                if threshold < 0.01:
+                    break
+                self._fallback.append(threshold)
+        self._fallback.append(0.0)
+        self._fallback_tensors = {}
         self.max_num = max_num
-        self.score_threshold = score_threshold
         self.num_classes = num_classes
 
     def topk(self, cls_scores, bbox_preds):
@@ -127,9 +141,11 @@ class TtNMSFreeCoder:
             boxes,
         )
 
-    def valid(self, boxes):
-        """``(bs, max_num)`` validity of :meth:`topk`'s boxes, 1.0 or 0.0: the box center inside
-        ``post_center_range``. On device."""
+    def valid(self, scores, boxes):
+        """``(bs, max_num)`` validity of :meth:`topk`'s scores and boxes, 1.0 or 0.0: the box
+        center inside ``post_center_range`` and, when set, the score past ``score_threshold`` or,
+        when no score of the sample is, past the fallback threshold. On device; the fallback
+        thresholds are uploaded on the first call, which a trace capture must follow."""
         valid = None
         for axis in range(3):
             center = boxes[..., BOX_CENTER.start + axis : BOX_CENTER.start + axis + 1]
@@ -137,7 +153,34 @@ class TtNMSFreeCoder:
                 ttnn.ge(center, self.post_center_range[axis]), ttnn.le(center, self.post_center_range[3 + axis])
             )
             valid = in_range if valid is None else ttnn.multiply(valid, in_range)
-        return ttnn.reshape(valid, tuple(valid.shape)[:-1])
+        valid = ttnn.reshape(valid, tuple(valid.shape)[:-1])
+        if self.score_threshold is None:
+            return valid
+        # The scores are sorted, so the first is the one any threshold must let through.
+        top_score = scores[:, 0:1]
+        # The first fallback threshold the top score reaches: they decrease, so it is the largest
+        # one at or below it; 0.0, every score passing, when none above 0.01 is.
+        fallback = self._fallback_tensor(scores.device())
+        reached = ttnn.multiply(fallback, ttnn.le(fallback, top_score))
+        fallback_threshold = ttnn.max(reached, dim=-1, keepdim=True)
+        passes_threshold = ttnn.gt(top_score, self.score_threshold)
+        passes = ttnn.add(
+            ttnn.multiply(passes_threshold, ttnn.gt(scores, self.score_threshold)),
+            ttnn.multiply(ttnn.rsub(passes_threshold, 1.0), ttnn.ge(scores, fallback_threshold)),
+        )
+        return ttnn.multiply(valid, passes)
+
+    def _fallback_tensor(self, device):
+        """The fallback thresholds, ``(1, n)`` float32 on ``device``."""
+        key = id(device)
+        if key not in self._fallback_tensors:
+            self._fallback_tensors[key] = ttnn.from_torch(
+                torch.tensor([self._fallback], dtype=torch.float32),
+                dtype=ttnn.float32,
+                layout=ttnn.TILE_LAYOUT,
+                device=device,
+            )
+        return self._fallback_tensors[key]
 
     @staticmethod
     def bottom_center(boxes):
@@ -148,10 +191,10 @@ class TtNMSFreeCoder:
         bottom = ttnn.subtract(boxes[..., z : z + 1], ttnn.multiply(boxes[..., height : height + 1], 0.5))
         return ttnn.concat([boxes[..., :z], bottom, boxes[..., z + 1 :]], dim=-1)
 
-    def finalize(self, boxes):
-        """:meth:`topk`'s boxes to upstream ``get_bboxes``' boxes and their validity, tested before
-        the move, as upstream's coder does."""
-        return self.bottom_center(boxes), self.valid(boxes)
+    def finalize(self, scores, boxes):
+        """:meth:`topk`'s scores and boxes to upstream ``get_bboxes``' boxes and their validity,
+        tested before the move, as upstream's coder does."""
+        return self.bottom_center(boxes), self.valid(scores, boxes)
 
     @staticmethod
     def compact(scores, labels, boxes, valid):
@@ -170,5 +213,5 @@ class TtNMSFreeCoder:
         scores, labels, _, boxes = self.topk(all_cls_scores[-1], all_bbox_preds[-1])
         return [
             {"bboxes": b, "scores": s, "labels": lab}
-            for b, s, lab in self.compact(scores, labels, boxes, self.valid(boxes))
+            for b, s, lab in self.compact(scores, labels, boxes, self.valid(scores, boxes))
         ]
