@@ -130,6 +130,9 @@ def attention_forward(
         )
     else:
         assert batch_size == 1, "a packed forward (segments) carries its users in the segments, not in batch_size"
+        assert (
+            indexed_rope
+        ), "a packed forward needs the whole-cache indexed RoPE: one cos/sin slice cannot serve segments at different cached_len"
         tt_sdpa_out = _attention_packed(
             xqkv_fused,
             hidden_states,
@@ -293,6 +296,7 @@ def _attention_packed(
     cache writes of every segment come first, so the MSA layers can then overlap one segment's cache gather
     with another's attention (msa_segments_pipelined); cold segments (no cache prefix) run their serial chain
     before that window. Consumes xqkv_fused (and hidden_states on MSA layers)."""
+    assert total_seq_len % len(segments) == 0, f"{total_seq_len} packed rows do not split into {len(segments)} segments"
     s_local = total_seq_len // len(segments)
     pres = []
     for i, (user, seg_cached_len) in enumerate(segments):
@@ -318,7 +322,11 @@ def _attention_packed(
     if config.is_sparse:
         hidden_states.deallocate(True)
     outs = [None] * len(pres)
-    warm = msa_overlap_segments(pres, kv_cache, mesh_config, ccl_manager) if config.is_sparse else []
+    warm = (
+        msa_overlap_segments([p.cached_len for p in pres], kv_cache, mesh_config, ccl_manager)
+        if config.is_sparse
+        else []
+    )
     for i, pre in enumerate(pres):
         if i not in warm:
             outs[i] = _attention_attend(
@@ -326,7 +334,10 @@ def _attention_packed(
             )
     if warm:
         pipelined = msa_segments_pipelined(
-            [MsaSegment(pres[i].q, pres[i].index_q, pres[i].user, pres[i].cached_len, pres[i].s_local) for i in warm],
+            [
+                MsaSegment(q=p.q, index_q=p.index_q, user=p.user, cached_len=p.cached_len, s_local=p.s_local)
+                for p in (pres[i] for i in warm)
+            ],
             kv_cache=kv_cache,
             layer_idx=layer_idx,
             mesh_config=mesh_config,

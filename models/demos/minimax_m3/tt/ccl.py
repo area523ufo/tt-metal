@@ -264,9 +264,9 @@ class CCLManager:
             assert (
                 gather.num_cores() >= needed
             ), f"gather strip of {gather.num_cores()} cores holds no 4-worker tier ({needed} needed)"
-            manager_id = mesh.create_sub_device_manager(
-                [ttnn.SubDevice([compute]), ttnn.SubDevice([gather])], 0
-            )  # 0 = local L1 size
+            # local_l1_size 0: no per-sub-device allocator, every buffer stays in the mesh's global allocator (as
+            # the MoE manager, tt/moe/shared_overlap.py).
+            manager_id = mesh.create_sub_device_manager([ttnn.SubDevice([compute]), ttnn.SubDevice([gather])], 0)
             try:
                 l1_small = ttnn.get_memory_view(mesh, ttnn.BufferType.L1_SMALL).total_bytes_per_bank > 0
                 sem_type = ttnn.BufferType.L1_SMALL if l1_small else ttnn.BufferType.L1

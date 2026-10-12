@@ -14,6 +14,7 @@ or the tokens are written / roped / MoE-masked at the wrong positions.
 import pytest
 
 from models.demos.common.prefill.chunk_layout import (
+    pack_segment_rows,
     packed_segments_real_counts,
     rotate_chunk_tokens,
     rotated_chunk_positions,
@@ -74,3 +75,8 @@ def test_packed_segments_real_counts(n_reals, sp, s_local, expected):
     """The packed forward's MoE padding counts: per chip, its leading real rows, or the whole chip when a pad
     row would precede a real one; None when nothing is padded."""
     assert packed_segments_real_counts(n_reals, sp, s_local) == expected
+
+
+def test_pack_segment_rows():
+    """Chip c of a packed forward holds each segment's c-th slice in segment order."""
+    assert pack_segment_rows([[0, 1, 2, 3], [4, 5, 6, 7]], 2) == [[0, 1, 4, 5], [2, 3, 6, 7]]

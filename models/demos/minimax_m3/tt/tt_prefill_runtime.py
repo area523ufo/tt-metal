@@ -39,7 +39,7 @@ from loguru import logger
 
 import ttnn
 from models.common.utils import block_cyclic_reorder
-from models.demos.common.prefill.chunk_layout import packed_segments_real_counts, rotate_chunk_tokens
+from models.demos.common.prefill.chunk_layout import pack_segment_rows, packed_segments_real_counts, rotate_chunk_tokens
 from models.demos.minimax_m3.utils.general_utils import sparse_attention_freq
 
 
@@ -248,7 +248,7 @@ class TtPrefillRuntime:
         self.compiled = False
 
     def release_sub_device_managers(self) -> None:
-        """Remove the MoE overlap sub-device manager before the mesh is closed. Idempotent."""
+        """Remove the MoE and MSA overlap sub-device managers before the mesh is closed. Idempotent."""
         if self.model_built:
             self.model.release_sub_device_managers()
 
@@ -320,9 +320,7 @@ class TtPrefillRuntime:
         assert (
             len(segment_tokens) * seg == cfg.chunk_size
         ), f"{len(segment_tokens)} segments x {seg} != chunk_size {cfg.chunk_size}"
-        s_local = seg // sp
-        tok = torch.tensor(segment_tokens, dtype=torch.int32).reshape(len(segment_tokens), sp, s_local)
-        tok = tok.permute(1, 0, 2).reshape(sp, 1, len(segment_tokens) * s_local)
+        tok = torch.tensor(pack_segment_rows(segment_tokens, sp), dtype=torch.int32).reshape(sp, 1, -1)
         return ttnn.from_torch(
             tok,
             device=self.mesh_device,
@@ -359,7 +357,7 @@ class TtPrefillRuntime:
         Each warm-up writes slot 0, which the real run overwrites. A packed runtime (segment shorter than the
         chunk) is refused: its cache period is the segment, and ``prefill_segments``' caller warms its programs."""
         assert self.model_built
-        self._assert_unpacked("compile")
+        self._assert_unpacked("compile")  # a packed runtime is warmed by prefill_segments' caller
         chunk = self.config.chunk_size
         cache_read_start = chunk if self.config.max_seq_len >= 2 * chunk else 0
         plan = [(0, chunk), (cache_read_start, chunk), (cache_read_start, chunk // 2)]  # (actual_start, real tokens)
@@ -440,7 +438,7 @@ class TtPrefillRuntime:
                 "run with PREFILL_LAYER_ACK_D2H=0 or wire the D2H ack into this runtime."
             )
         assert self.model_built, "build the model before prefill_chunk()"
-        self._assert_unpacked("prefill_chunk")
+        self._assert_unpacked("prefill_chunk")  # a packed runtime takes prefill_segments()
         assert 0 <= slot_id < self.config.num_users, f"slot_id {slot_id} out of range [0, {self.config.num_users})"
         assert (
             actual_start + self.config.chunk_size <= self.config.max_seq_len
@@ -518,11 +516,12 @@ class TtPrefillRuntime:
         return out  # logits [1,1,chunk_local,vocab_shard], SP-sharded on seq / TP-sharded on vocab
 
     def _assert_unpacked(self, what: str) -> None:
-        """Refuse a per-chunk entry point on a packed runtime (cache period shorter than the chunk)."""
+        """Refuse an entry point that takes the chunk as the cache period on a packed runtime (period = the
+        segment, shorter than the chunk); the call sites say what to use instead."""
         cfg = self.config
         assert cfg.segment_size in (None, cfg.chunk_size), (
-            f"{what}() writes one {cfg.chunk_size}-token chunk, but this runtime's cache period is the "
-            f"{cfg.segment_size}-token segment (segment_size < chunk_size): use prefill_segments()"
+            f"{what}() takes the {cfg.chunk_size}-token chunk as the cache period, but this runtime is packed "
+            f"(segment_size {cfg.segment_size} < chunk_size)"
         )
 
     def prefill_segments(self, input_tensor: ttnn.Tensor, kv_cache, segments: list, request_id: int = 0):
@@ -530,7 +529,9 @@ class TtPrefillRuntime:
         ``(slot, cached_len, n_real)``. The layer norms, the fused QKV projection and the MoE run once on the
         packed rows; the head split, QK-norm, RoPE, the index branch (its projections included), the KV and
         index_k writes, the SP gathers, indexer, top-k and SDPA run per segment against that segment's slot at
-        its cached_len. Returns what prefill_chunk returns (None on a last rank, the hidden state otherwise)."""
+        its cached_len. Returns what prefill_chunk returns (None on a last rank, the hidden state otherwise).
+        ``request_id`` mirrors prefill_chunk's and is unread: no layer-completion sink can be bound on a packed
+        runtime (class docstring)."""
         cfg = self.config
         seg, sp = cfg.seg, cfg.sp_factor
         assert self.model_built, "build the model before prefill_segments()"
@@ -663,8 +664,8 @@ class TtPrefillRuntime:
         the cache is ND-sharded ROUND_ROBIN_1D, and slicing into another ND-shard miscomputes the DRAM
         core on host read-back.
         """
-        start = slot * self.config.num_layers
-        end = start + self.config.num_layers
+        start = kv_cache.slot(slot, 0)
+        end = start + kv_cache.num_layers
         seq_read = self.read_seq_len(n_tokens)
         rows = seq_read // self.config.sp_factor  # per-chip rows holding the first seq_read positions
         composer = ttnn.ConcatMesh2dToTensor(self.mesh_device, dims=(2, 1), mesh_shape=self.mesh_device.shape)

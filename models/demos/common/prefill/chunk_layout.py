@@ -59,6 +59,18 @@ def rotated_chunk_real_counts(chunk_start: int, actual_isl: int, sp: int, chunk_
     return [sum(p < end for p in row) for row in rotated_chunk_positions(chunk_start, sp, chunk_local)]
 
 
+def pack_segment_rows(segments: list[list], sp: int) -> list[list]:
+    """Chip-major order of a packed forward's rows: ``segments`` holds each segment's rows (tokens, or row ids)
+    in natural order; chip c receives every segment's c-th ``seg/sp`` slice back to back, which is how
+    ``prefill_segments`` slices the segments out of the packed activations again."""
+    lengths = {len(s) for s in segments}
+    assert len(lengths) == 1, f"segments of different lengths: {sorted(lengths)}"
+    (seg,) = lengths
+    assert seg % sp == 0, f"segment of {seg} rows does not split over sp={sp}"
+    s_local = seg // sp
+    return [[r for s in segments for r in s[c * s_local : (c + 1) * s_local]] for c in range(sp)]
+
+
 def packed_segments_real_counts(n_reals: list[int], sp: int, s_local: int) -> list[int] | None:
     """Per-chip count of leading real rows of a packed forward of segments holding ``n_reals`` real tokens
     each, or None when no chip can skip a row (every row real, or pad rows only ahead of a later segment's

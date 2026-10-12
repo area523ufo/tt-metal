@@ -327,7 +327,6 @@ def msa_sp_attention_nocache(
     block_size,
     topk_blocks,
     num_groups=1,
-    return_block_ids=False,
 ):
     """Sharded-query MSA under SP: AllGather only the KEYS; q/index_q stay sharded (S/sp rows/device).
 
@@ -531,11 +530,11 @@ class MsaSegment:
     s_local: int
 
 
-def msa_overlap_segments(segments, kv_cache, mesh_config, ccl_manager):
-    """Indices of a packed forward's segments (objects with ``cached_len``) that msa_segments_pipelined takes:
+def msa_overlap_segments(cached_lens, kv_cache, mesh_config, ccl_manager):
+    """Indices of a packed forward's segments (given by their ``cached_lens``) that msa_segments_pipelined takes:
     the warm ones (cached_len > 0) when the overlap is on, a cache exists, at least two are warm and there is
     an SP axis to gather over; [] otherwise, and every segment then runs its serial chain."""
-    warm = [i for i, s in enumerate(segments) if s.cached_len > 0]
+    warm = [i for i, c in enumerate(cached_lens) if c > 0]
     if not (MSA_SEGMENT_OVERLAP and kv_cache is not None and len(warm) >= 2):
         return []
     return warm if ccl_manager.mesh_device.shape[mesh_config.sp_axis] >= 2 else []
