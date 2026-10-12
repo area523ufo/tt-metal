@@ -5,13 +5,21 @@
 """TTNN port of BEVFormer's NMS-free box coder, from UniAD's ``TtNMSFreeCoder``
 (``models/experimental/uniad/tt/ttnn_nms_free_coder.py``).
 
-The top-k selection and the box decoding run on device. Only the final range and score
-filter (``reference.nms_free_coder.filter_boxes``) runs on host, on the ``max_num`` selected
-boxes: it keeps a data-dependent number of them, so it ends the pipeline.
+The top-k selection, the box decoding, the ``post_center_range`` test and upstream
+``BEVFormerHead.get_bboxes``' move of z to the box's bottom face run on device, on fixed
+``(bs, max_num)`` tensors, with the range test as a validity mask. Only dropping the invalid boxes
+runs on host (:meth:`TtNMSFreeCoder.compact`): it leaves a data-dependent number of boxes, which no
+device tensor can hold, as ttnn shapes, and a trace's, are fixed. For BEVFormer-base it drops none:
+the head scales the centers into ``pc_range``, inside ``post_center_range``.
+
+Upstream's ``score_threshold`` is not ported: no BEVFormer config sets it, and its fallback, which
+lowers the threshold by 10% at a time until some score passes, depends on the scores.
 """
 
 import ttnn
 from models.experimental.bevformer.model_config import (
+    BOX_CENTER,
+    BOX_SIZE,
     CODE_COS,
     CODE_H,
     CODE_SIN,
@@ -25,7 +33,6 @@ from models.experimental.bevformer.model_config import (
     POST_CENTER_RANGE,
     SCORE_DTYPE,
 )
-from models.experimental.bevformer.reference.nms_free_coder import filter_boxes
 
 # Candidates the exact float32 top-k ranks; see TtNMSFreeCoder.topk.
 NUM_CANDIDATES = 512
@@ -60,6 +67,8 @@ class TtNMSFreeCoder:
         score_threshold=None,
         num_classes=NUM_CLASSES,
     ):
+        if score_threshold is not None:
+            raise NotImplementedError("TtNMSFreeCoder has no score_threshold; see the module docstring")
         self.post_center_range = post_center_range
         self.max_num = max_num
         self.score_threshold = score_threshold
@@ -118,12 +127,48 @@ class TtNMSFreeCoder:
             boxes,
         )
 
-    def decode(self, all_cls_scores, all_bbox_preds):
-        """The head's ``(L, bs, num_query, *)`` device outputs to one dict of host boxes, scores
-        and labels per sample, from the last decoder layer."""
-        scores, labels, _, boxes = self.topk(all_cls_scores[-1], all_bbox_preds[-1])
-        scores, labels, boxes = (ttnn.to_torch(t) for t in (scores, labels, boxes))
+    def valid(self, boxes):
+        """``(bs, max_num)`` validity of :meth:`topk`'s boxes, 1.0 or 0.0: the box center inside
+        ``post_center_range``. On device."""
+        valid = None
+        for axis in range(3):
+            center = boxes[..., BOX_CENTER.start + axis : BOX_CENTER.start + axis + 1]
+            in_range = ttnn.multiply(
+                ttnn.ge(center, self.post_center_range[axis]), ttnn.le(center, self.post_center_range[3 + axis])
+            )
+            valid = in_range if valid is None else ttnn.multiply(valid, in_range)
+        return ttnn.reshape(valid, tuple(valid.shape)[:-1])
+
+    @staticmethod
+    def bottom_center(boxes):
+        """Boxes with z moved from the box's gravity center to its bottom face, as upstream
+        ``BEVFormerHead.get_bboxes`` sets it. On device."""
+        z = BOX_CENTER.start + 2
+        height = BOX_SIZE.start + 2
+        bottom = ttnn.subtract(boxes[..., z : z + 1], ttnn.multiply(boxes[..., height : height + 1], 0.5))
+        return ttnn.concat([boxes[..., :z], bottom, boxes[..., z + 1 :]], dim=-1)
+
+    def finalize(self, boxes):
+        """:meth:`topk`'s boxes to upstream ``get_bboxes``' boxes and their validity, tested before
+        the move, as upstream's coder does."""
+        return self.bottom_center(boxes), self.valid(boxes)
+
+    @staticmethod
+    def compact(scores, labels, boxes, valid):
+        """:meth:`finalize`'s device tensors to one ``(boxes, scores, labels)`` per sample on the
+        host, the valid ones: the one step whose output size depends on the data."""
+        scores, labels, boxes, valid = (ttnn.to_torch(t) for t in (scores, labels, boxes, valid))
         return [
-            filter_boxes(*sample, self.post_center_range, self.score_threshold)
-            for sample in zip(scores.float(), labels.long(), boxes.float())
+            (b.float()[v.bool()], s.float()[v.bool()], lab.long()[v.bool()])
+            for s, lab, b, v in zip(scores, labels, boxes, valid)
+        ]
+
+    def decode(self, all_cls_scores, all_bbox_preds):
+        """The head's ``(L, bs, num_query, *)`` device outputs to one dict of host boxes, scores and
+        labels per sample, from the last decoder layer, as ``reference.nms_free_coder.NMSFreeCoder.decode``
+        returns them; all but dropping the invalid boxes on device."""
+        scores, labels, _, boxes = self.topk(all_cls_scores[-1], all_bbox_preds[-1])
+        return [
+            {"bboxes": b, "scores": s, "labels": lab}
+            for b, s, lab in self.compact(scores, labels, boxes, self.valid(boxes))
         ]
