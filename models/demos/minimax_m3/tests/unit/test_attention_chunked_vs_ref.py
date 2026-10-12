@@ -25,6 +25,7 @@ from loguru import logger
 import ttnn
 from models.common.utility_functions import comp_pcc
 from models.common.utils import block_cyclic_reorder
+from models.demos.common.prefill.chunk_layout import pack_segment_rows
 from models.demos.minimax_m3.config import MeshConfig
 from models.demos.minimax_m3.tt.attention import Attention, AttentionConfig, allocate_kv_caches, msa
 from models.demos.minimax_m3.tt.attention_configs import MiniMaxM3AttentionProgramConfig
@@ -397,9 +398,9 @@ def test_attention_packed_segments(mesh_device, device_params, layer_kind, reset
         return torch.cat([compose_tp_hidden(dts, r, cols) for r in range(rows)], dim=2)  # [1, 1, rows, H]
 
     def cache_slots(kvc):
-        # every chip's slots of the three caches, in device order
+        # [chips, users*layers, heads, seq_local, hd] per cache: the slot dim indexes the users (one layer)
         return [
-            torch.cat(
+            torch.stack(
                 [
                     ttnn.to_torch(d).float()
                     for d in ttnn.get_device_tensors(ttnn.to_memory_config(t, ttnn.DRAM_MEMORY_CONFIG))
@@ -416,42 +417,56 @@ def test_attention_packed_segments(mesh_device, device_params, layer_kind, reset
             if cached_len:
                 run(x[u, 0], u, 0, kvc)
 
-    # Reference: every segment through the per-chunk entry point.
-    kvc_ref = allocate_kv_caches(mesh_device, num_layers=1, max_seq_len=total, sp_axis=sp_axis, num_users=len(users))
-    try:
-        fill(kvc_ref)
-        ref = [run(segment_rows(u, c), u, c, kvc_ref) for u, c in users]
-        ttnn.synchronize_device(mesh_device)
-        ref_caches = cache_slots(kvc_ref)
-    finally:
-        kvc_ref.deallocate()
+    # the chip-major order of the packed rows (what prefill_segments' input holds), as row ids
+    order = torch.tensor(pack_segment_rows([list(range(i * chunk, (i + 1) * chunk)) for i in range(len(users))], sp))
+    order = order.reshape(-1)
 
     def packed(overlap_on):
         monkeypatch.setattr(msa, "MSA_SEGMENT_OVERLAP", overlap_on)
         kvc = allocate_kv_caches(mesh_device, num_layers=1, max_seq_len=total, sp_axis=sp_axis, num_users=len(users))
         try:
             fill(kvc)
-            # chip r holds each segment's r-th slice back to back (TtPrefillRuntime.make_segments_input)
-            rows_in = torch.stack([segment_rows(u, c) for u, c in users]).reshape(len(users), sp, chunk_local, HIDDEN)
-            rows_in = rows_in.permute(1, 0, 2, 3).reshape(-1, HIDDEN)
-            out = run(rows_in, 0, 0, kvc, segments=users)
+            natural = torch.cat([segment_rows(u, c) for u, c in users])  # [N*chunk, H], segment after segment
+            out = run(natural[order], 0, 0, kvc, segments=users)[0, 0]  # chip-major rows
             ttnn.synchronize_device(mesh_device)
-            out = out.reshape(sp, len(users), chunk_local, -1).permute(1, 0, 2, 3).reshape(len(users), 1, 1, chunk, -1)
-            return [out[i] for i in range(len(users))], cache_slots(kvc)
+            back = torch.empty_like(out)
+            back[order] = out
+            outs = [back[i * chunk : (i + 1) * chunk].reshape(1, 1, chunk, -1) for i in range(len(users))]
+            return outs, cache_slots(kvc)
         finally:
             kvc.deallocate()
 
-    outs, caches = packed(True)
-    for i, (u, c) in enumerate(users):
-        passing, pcc = comp_pcc(ref[i], outs[i], 0.99)
-        logger.info(f"[{layer_kind}] packed segment {i} (user {u}, cached {c}) vs per-chunk: pcc={pcc}")
-        assert passing, f"{layer_kind} packed segment {i} differs from the per-chunk path: {pcc}"
-    for name, a, b in zip(("k", "v", "index_k"), ref_caches, caches):
-        passing, pcc = comp_pcc(a, b, 0.99)
-        assert passing, f"{layer_kind} packed forward wrote a different {name} cache: {pcc}"
-    if is_sparse:
-        outs_off, caches_off = packed(False)
-        for i in range(len(users)):
-            assert torch.equal(outs[i], outs_off[i]), f"overlap on/off differ on segment {i}"
-        for a, b in zip(caches, caches_off):
-            assert torch.equal(a, b)
+    try:
+        # Reference: every segment through the per-chunk entry point.
+        kvc_ref = allocate_kv_caches(
+            mesh_device, num_layers=1, max_seq_len=total, sp_axis=sp_axis, num_users=len(users)
+        )
+        try:
+            fill(kvc_ref)
+            ref = [run(segment_rows(u, c), u, c, kvc_ref) for u, c in users]
+            ttnn.synchronize_device(mesh_device)
+            ref_caches = cache_slots(kvc_ref)
+        finally:
+            kvc_ref.deallocate()
+
+        outs, caches = packed(True)
+        if is_sparse:
+            assert attn.ccl_manager._msa_overlap is not None, "the on run did not take the pipelined path"
+        # Device against device with the same ops and weights: only the fused QKV projection sees more rows per
+        # chip, so the residual is bf16 rounding (0.9999 measured); 0.999 leaves a 10x margin.
+        for i, (u, c) in enumerate(users):
+            passing, pcc = comp_pcc(ref[i], outs[i], 0.999)
+            logger.info(f"[{layer_kind}] packed segment {i} (user {u}, cached {c}) vs per-chunk: pcc={pcc}")
+            assert passing, f"{layer_kind} packed segment {i} differs from the per-chunk path: {pcc}"
+        for name, a, b in zip(("k", "v", "index_k"), ref_caches, caches):
+            for u, _ in users:  # one check per (cache, user slot); a dense layer's index_k is zeros on both sides
+                passing, pcc = comp_pcc(a[:, u], b[:, u], 0.999)
+                assert passing, f"{layer_kind} packed forward wrote a different {name} cache for user {u}: {pcc}"
+        if is_sparse:
+            outs_off, caches_off = packed(False)
+            for i in range(len(users)):
+                assert torch.equal(outs[i], outs_off[i]), f"overlap on/off differ on segment {i}"
+            for a, b in zip(caches, caches_off):
+                assert torch.equal(a, b)
+    finally:
+        attn.ccl_manager.release_msa_overlap()
