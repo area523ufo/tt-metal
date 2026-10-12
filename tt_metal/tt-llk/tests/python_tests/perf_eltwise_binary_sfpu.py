@@ -4,7 +4,7 @@
 import pytest
 import test_eltwise_binary_sfpu as _func
 from helpers.constraints import distinct_dest_accumulation_modes
-from helpers.llk_params import ApproximationMode, DestAccumulation, MathOperation
+from helpers.llk_params import ApproximationMode, DestAccumulation
 from helpers.param_config import parametrize
 from helpers.perf.core import ALL_PERF_RUN_TYPES
 
@@ -21,21 +21,10 @@ _ATAN2_PERF_AXES = {
     "approx_mode": [ApproximationMode.Yes, ApproximationMode.No],
 }
 
-_PERF_EXCLUDED_MATHOPS = {
-    # TODO(#58145): profiler register pressure prevents a production-equivalent build.
-    MathOperation.SfpuDivInt32,
-    MathOperation.SfpuDivInt32Floor,
-}
-
 # A functional sweep dict shared below becomes perf cases, times the run types.
-# Narrow it here when a point should stay functional-only, as with the ops below.
+# Narrow it here when a point should stay functional-only.
 _INT_UNIFORM_PERF_SWEEP = {
     **_func.INT_UNIFORM_SWEEP,
-    "mathop": [
-        mathop
-        for mathop in _func.INT_UNIFORM_SWEEP["mathop"]
-        if mathop not in _PERF_EXCLUDED_MATHOPS
-    ],
 }
 
 
