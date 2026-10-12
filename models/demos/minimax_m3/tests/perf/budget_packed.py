@@ -25,6 +25,10 @@ Env:
   BUDGET_CAPACITY    per-slot KV capacity in tokens                        [default: max needed + 2048]
   BUDGET_WARMUP / BUDGET_ITERS   warm-up and timed forwards per composition                [2 / 5]
   BUDGET_DUMP_KV     directory: after the last composition, save each slot's [k, v, index_k] (torch)
+  BUDGET_FILL        real | none. none skips the history fill and attends a ZEROED cache: shapes, gathers
+                     and op costs are the real ones but the block selection is degenerate (every score
+                     equal), so the sparse attention runs faster than on real content. For profiling only:
+                     a device-profiler capture of the real fill is tens of GB per 100k of depth  [default real]
   BUDGET_REFERENCE   1 -> run each segment alone on the plain path (see above)            [default 0]
   BUDGET_TOPK_DUMP   file: record the MSA top-k block ids of one extra forward of the last composition
   BUDGET_PROFILE     1 -> zone-profile one extra forward of the last composition (run under
@@ -135,6 +139,8 @@ def main():
     stages = int(os.getenv("BUDGET_STAGES", "2"))
     stage = int(os.getenv("BUDGET_STAGE", "0"))
     dump = os.getenv("BUDGET_DUMP_KV")
+    fill_mode = os.getenv("BUDGET_FILL", "real")
+    assert fill_mode in ("real", "none"), fill_mode
 
     src = json.load(open(os.environ["BUDGET_TOKENS"]))["token_ids"]
     tok = lambda stream, p: [src[(p + STREAM_STRIDE * stream + i) % len(src)] for i in range(SEG)]
@@ -148,6 +154,7 @@ def main():
         capacity=capacity,
         slots=n_slots,
         reference=reference,
+        fill=fill_mode,
         warmup=warmup,
         iters=iters,
         stages=stages,
@@ -209,7 +216,7 @@ def main():
 
         def fill(slot, stream, h):
             d = depth.get(slot, (stream, 0))[1] if depth.get(slot, (stream, 0))[0] == stream else 0
-            todo = [(slot, stream, p, SEG) for p in range(d, h, SEG)]
+            todo = [] if fill_mode == "none" else [(slot, stream, p, SEG) for p in range(d, h, SEG)]
             while todo:
                 group, todo = todo[:B], todo[B:]
                 group += [(scratch, 0, 0, SEG)] * (B - len(group))
