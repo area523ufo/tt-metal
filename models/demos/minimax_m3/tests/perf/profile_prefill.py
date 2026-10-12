@@ -16,7 +16,8 @@ cache". Layers 0-2 are dense (dense attention + dense MLP), layers 3-59 are spar
 single chunk profiles both classes; the report separates them by the layer tag.
 
 What you get per zone: summed DEVICE KERNEL DURATION [ns] per device (with the across-device skew),
-op count, bytes moved (from the CSV's input/output shapes + dtypes) and the implied GB/s. Parse with
+op count, bytes moved (from the CSV's input/output shapes + dtypes), the implied GB/s and, when the CSV has
+FW cycle columns, the zone's firmware span (README_profiling.md). Parse with
     python3 models/demos/minimax_m3/tests/perf/parse_zone_perf.py <ops_perf_results_*.csv> --html report.html
 
 Zone list — dense layer: input_norm, attn/{qkv_proj,split_heads,qk_norm,rope,kv_write,
@@ -386,7 +387,8 @@ def main():
             print(f"[zone-prof] prefix filled in {(time.perf_counter()-t0):.1f}s", flush=True)
 
         if skip_compile:
-            # Instead of compile()'s warm-up chunks: the profiled chunk's own programs (twice, like the timing harness).
+            # Instead of compile()'s warm-up chunks: the profiled chunk's own programs, twice (the prefix fill has
+            # already warmed the full-chunk programs unless PROFILE_SKIP_PREFIX=1).
             for _ in range(2):
                 prefill_chunk(n_chunks - 1)
             ttnn.synchronize_device(mesh)

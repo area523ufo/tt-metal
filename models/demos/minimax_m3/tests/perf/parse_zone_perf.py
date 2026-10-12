@@ -16,8 +16,9 @@ that is what excludes the warmup and cache-prefix chunks, whose ops are in the s
 Per zone it reports, for each device separately and then across devices:
   * device-kernel time  (sum of DEVICE KERNEL DURATION [ns])
   * span: the firmware wall of the zone (last FW end - first FW start, from the FW cycle columns), dispatch
-    gaps included, so above the kernel sum even for a serial zone under tracy. An overlap shows up as the
-    span of a zone falling between a serial and a pipelined capture while the kernel sum stays put
+    gaps included, so above the kernel sum even for a serial zone under tracy; the hull over every entry of
+    the zone in its layer, so a zone entered per segment spans the segments in between. An overlap shows up
+    as a once-entered zone's span falling between a serial and a pipelined capture while the kernel sum stays put
   * op count
   * bytes moved (in + out, from the per-op shape/dtype columns) and the implied GB/s
   * DRAM BW UTIL (%) / NOC UTIL (%) means when the run used --collect-noc-traces

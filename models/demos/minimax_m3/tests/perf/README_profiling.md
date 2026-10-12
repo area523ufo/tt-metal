@@ -201,11 +201,14 @@ Same mechanism deepseek_v3_d_p uses (`forward_layer_{i}_start` in `tt/tt_prefill
 - **`ms` is the worst device's sum.** With 32 chips the mesh waits for the slowest, so the max is the
   wall-clock-relevant number. `skew ms` (max − min) is what separates a genuinely slow CCL from one
   that is merely waiting on a peer.
-- **`span ms` is the firmware wall of the zone on the worst device**: last firmware end − first firmware start
-  (from the FW cycle columns), so it also holds every dispatch gap between the zone's ops; under tracy that puts
-  it well above `ms` even for a serial zone. The overlap signal is the same zone's span falling between a serial
-  and a pipelined capture while `ms` (the kernel sum, which never shrinks under an overlap) stays put. `-` when
-  the CSV has no FW cycle columns.
+- **`span ms` is the largest firmware wall of the zone over the devices**: last firmware end − first firmware
+  start (from the FW cycle columns), so it also holds every dispatch gap between the zone's ops; under tracy that
+  puts it well above `ms` even for a serial zone. It is the hull over every entry of the zone within its layer:
+  in a packed forward the per-op zones are entered once per segment (and `seg{i}/sparse_sdpa` straddles the
+  window), so only once-entered zones (`attn`, `mlp`, the layer) read as walls and a per-op span covers the
+  segments in between. The overlap signal is a once-entered zone's span falling between a serial and a pipelined
+  capture while `ms` (the kernel sum, which never shrinks under an overlap) stays put. `-` when the CSV has no FW
+  cycle columns.
 - **`GB/s` is bytes-moved ÷ that zone's device time**, with bytes computed from each op's input+output
   shapes and dtypes (block-float formats include their block scales). Compare against the chip's DRAM
   ceiling to judge whether a zone is bandwidth-bound.

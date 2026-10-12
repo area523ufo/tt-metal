@@ -37,8 +37,8 @@ Env:
   BUDGET_PROFILE     1 -> zone-profile one extra forward of the last composition (run under
                      `python3 -m tracy -v -r -p`; zones as for profile_prefill.py, root `profiled_chunk`;
                      the profiler is drained every BUDGET_PROFILE_READ_EVERY [16] forwards outside it) [default 0]
-  BUDGET_STAGES / BUDGET_STAGE, BUDGET_TOKENS, M3_FABRIC, EXPERT_DTYPE, HF_MODEL, TT_CACHE_PATH as
-  for budget_sweep.py.
+  BUDGET_STAGES / BUDGET_STAGE, BUDGET_TOKENS, M3_FABRIC, M3_CCL_TOPOLOGY, EXPERT_DTYPE, HF_MODEL,
+  TT_CACHE_PATH as for budget_sweep.py.
 """
 
 import json
