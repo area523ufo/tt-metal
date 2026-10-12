@@ -179,14 +179,14 @@ void SparseSDPAMsaOperation::validate_on_program_cache_miss(
         tile_w,
         attrs.block_size);
     TT_FATAL(attrs.scale > 0.0f, "scale must be > 0");
-    if (attrs.core_grid.has_value()) {
-        const auto& cg = attrs.core_grid.value();
-        TT_FATAL(cg.size() == 1, "sparse_sdpa_msa: core_grid must be one rectangle (got {} ranges)", cg.size());
+    if (attrs.sub_core_grids.has_value()) {
+        const auto& cg = attrs.sub_core_grids.value();
+        TT_FATAL(cg.size() == 1, "sparse_sdpa_msa: sub_core_grids must be one rectangle (got {} ranges)", cg.size());
         const auto device_grid = q.device()->compute_with_storage_grid_size();
         const auto end = cg.bounding_box().end_coord;
         TT_FATAL(
             end.x < device_grid.x && end.y < device_grid.y,
-            "sparse_sdpa_msa: core_grid {} exceeds the compute grid {}x{}",
+            "sparse_sdpa_msa: sub_core_grids {} exceeds the compute grid {}x{}",
             cg,
             device_grid.x,
             device_grid.y);
@@ -385,7 +385,7 @@ ttsl::hash::hash_t SparseSDPAMsaOperation::compute_program_hash(
         // The RESOLVED slot count: the CB layout and kernels bake it in, and auto depends on free L1 at this call.
         // A request that resolves to no slots aliases the cache-off program (same layout, same kernels).
         attrs.kv_cache_slots,
-        attrs.core_grid,
+        attrs.sub_core_grids,
         t.indices.logical_shape(),
         t.indices.dtype());
 }
@@ -469,8 +469,8 @@ SparseSDPAMsaOperation::DispatchArgs SparseSDPAMsaOperation::compute_dispatch_ar
     const uint32_t slot = attrs.cache_batch_idx.value_or(0);
     tt::tt_metal::CoreCoord grid = t.q.device()->compute_with_storage_grid_size();
     tt::tt_metal::CoreCoord origin{0, 0};
-    if (attrs.core_grid.has_value()) {
-        const auto box = attrs.core_grid->bounding_box();
+    if (attrs.sub_core_grids.has_value()) {
+        const auto box = attrs.sub_core_grids->bounding_box();
         grid = box.grid_size();
         origin = box.start_coord;
     }
@@ -585,7 +585,7 @@ Tensor sparse_sdpa_msa(
     std::optional<uint32_t> cluster_axis,
     std::optional<BlockCyclicLayout> block_cyclic,
     bool enable_kv_block_cache,
-    std::optional<tt::tt_metal::CoreRangeSet> core_grid) {
+    std::optional<tt::tt_metal::CoreRangeSet> sub_core_grids) {
     using OperationType = ttnn::prim::SparseSDPAMsaOperation;
     OperationType::operation_attributes_t attrs{
         .scale = scale,
@@ -596,7 +596,7 @@ Tensor sparse_sdpa_msa(
         .chunk_start_idx = chunk_start_idx,
         .cluster_axis = cluster_axis,
         .enable_kv_block_cache = enable_kv_block_cache,
-        .core_grid = std::move(core_grid),
+        .sub_core_grids = std::move(sub_core_grids),
     };
     const OperationType::tensor_args_t tensors{.q = q, .k = k, .v = v, .indices = indices};
     // One resolution per call, against the L1 free now; the hash and the factory read this count.

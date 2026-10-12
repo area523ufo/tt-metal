@@ -43,7 +43,7 @@ struct SparseSDPAMsaParams {
     // Worker cores. Unset: the whole compute grid from (0, 0). Set: one rectangle anywhere in the grid, so the op
     // can run on a compute sub-device while a collective owns the rest; the per-core work split is the same
     // contiguous S*n_kv partition over that rectangle's core count. Hashed (it fixes the kernels' core ranges).
-    std::optional<tt::tt_metal::CoreRangeSet> core_grid = std::nullopt;
+    std::optional<tt::tt_metal::CoreRangeSet> sub_core_grids = std::nullopt;
     bool has_indexed_kv_cache() const { return cache_batch_idx.has_value(); }
     bool causal_enabled() const { return chunk_start_idx.has_value(); }
     bool has_block_cyclic() const { return block_cyclic.has_value(); }

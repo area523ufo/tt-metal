@@ -107,7 +107,7 @@ struct SparseSDPAMsaOperation {
     // override_runtime_arguments (hit-patch) write the same values and cannot drift.
     struct DispatchArgs {
         tt::tt_metal::CoreCoord grid;    // worker rectangle size; per-core arg order: core i == core_at(i)
-        tt::tt_metal::CoreCoord origin;  // its first core ((0, 0) without core_grid)
+        tt::tt_metal::CoreCoord origin;  // its first core ((0, 0) without sub_core_grids)
         uint32_t num_cores = 0;
         uint32_t base_work = 0;  // total_work = S * n_kv over num_cores; the first `extra` cores take one more
         uint32_t extra = 0;
@@ -201,6 +201,6 @@ Tensor sparse_sdpa_msa(
     std::optional<uint32_t> cluster_axis = std::nullopt,
     std::optional<BlockCyclicLayout> block_cyclic = std::nullopt,
     bool enable_kv_block_cache = false,
-    std::optional<tt::tt_metal::CoreRangeSet> core_grid = std::nullopt);
+    std::optional<tt::tt_metal::CoreRangeSet> sub_core_grids = std::nullopt);
 
 }  // namespace ttnn::prim

@@ -229,7 +229,7 @@ def msa_sparse_attend(
         block_cyclic_sp_axis=block_cyclic_sp_axis,
         block_cyclic_chunk_local=block_cyclic_chunk_local,
         enable_kv_block_cache=MSA_KV_BLOCK_CACHE,
-        core_grid=overlap.compute_cores if overlap is not None else None,
+        sub_core_grids=overlap.compute_cores if overlap is not None else None,
     )
 
 
