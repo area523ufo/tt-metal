@@ -41,6 +41,10 @@ Env:
   PROFILE_LAYER_IDS   explicit global layer indices, e.g. "0,3" = one dense + one sparse. The fastest
                       way to cover both classes; overrides PROFILE_NUM_LAYERS. Cache-only.
   PROFILE_READ_EVERY  call ttnn.ReadDeviceProfiler every N layers (<1000 ops/read!)   [default 1]
+  PROFILE_N_REAL      real tokens in the profiled chunk; the rest is pad (actual_end < chunk end)
+                      [default: PROFILE_CHUNK]
+  PROFILE_SKIP_COMPILE "1" -> skip runtime.compile()'s sweep over every cache bucket and warm only the
+                      profiled chunk. Keeps the tracy capture small at deep caches   [default 0]
   PROFILE_SKIP_PREFIX "1" -> skip the prefix fill and attend a ZEROED cache. Shapes (and op costs)
                       are identical but MoE routing is not representative — bring-up only  [default 0]
   PROFILE_STAGES      intra-galaxy pipeline depth: 1 (whole 8x4 galaxy), 2 ((4,4) sub-meshes, EP16) or
@@ -343,15 +347,20 @@ def main():
         # too, but outside the `profiled_chunk` zone, so the parser drops them.
         print(f"[zone-prof] warmup / compile ({num_layers}L, SP={sp} x TP={tp} + EP={sp * tp}) ...", flush=True)
         t0 = time.perf_counter()
-        runtime.compile(kv_cache)
+        skip_compile = os.getenv("PROFILE_SKIP_COMPILE") == "1"
+        if not skip_compile:
+            runtime.compile(kv_cache)
         print(f"[zone-prof] warmup done in {(time.perf_counter()-t0):.1f}s", flush=True)
 
         tokens = load_tokens(total)
 
-        def prefill_chunk(c):
+        n_real = int(os.getenv("PROFILE_N_REAL", str(chunk)))
+        assert 0 < n_real <= chunk, f"PROFILE_N_REAL={n_real} must be in (0, {chunk}]"
+
+        def prefill_chunk(c, n=chunk):
             a = c * chunk
             inp = runtime.make_chunk_input(tokens[a : a + chunk])
-            out = runtime.prefill_chunk(inp, kv_cache, slot_id=0, actual_start=a, actual_end=a + chunk)
+            out = runtime.prefill_chunk(inp, kv_cache, slot_id=0, actual_start=a, actual_end=a + n)
             if out is not None:  # a non-last stage returns the hidden state meant for the next stage
                 out.deallocate(True)
 
@@ -376,6 +385,16 @@ def main():
             ttnn.synchronize_device(mesh)
             print(f"[zone-prof] prefix filled in {(time.perf_counter()-t0):.1f}s", flush=True)
 
+        if skip_compile:
+            # No bucket sweep: warm the profiled chunk's own programs instead (twice, like the timing harness).
+            for _ in range(2):
+                prefill_chunk(n_chunks - 1)
+            ttnn.synchronize_device(mesh)
+        if n_real < chunk:
+            # A short chunk builds a different MoE padding config: warm it here, not inside the profile.
+            prefill_chunk(n_chunks - 1, n_real)
+            ttnn.synchronize_device(mesh)
+
         # --- 3. the profiled chunk, bracketed by the `profiled_chunk` zone. Everything the parser
         # reports is nested under it, which is what separates this chunk from warmup + prefix.
         read_note = (
@@ -392,7 +411,7 @@ def main():
         state["in_chunk"] = True
         t0 = time.perf_counter()
         with zone("profiled_chunk", COARSE):
-            prefill_chunk(n_chunks - 1)
+            prefill_chunk(n_chunks - 1, n_real)
             ttnn.synchronize_device(mesh)
         wall = time.perf_counter() - t0
         state["in_chunk"] = False
