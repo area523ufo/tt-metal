@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import dataclass
+
 import torch
+from loguru import logger
 
 import ttnn
 
@@ -10,6 +13,28 @@ import ttnn
 # enough on 8x4 for a later op's circular buffers to collide (deepseek_v3_d_p/tests/test_mla.py). Same size
 # the DeepSeek/GLM/Kimi adapters reserve.
 L1_SMALL_SIZE = 1152
+
+# Packed-forward MSA overlap (tt/attention/msa.py msa_segments_pipelined): the bottom rows of the grid carry the
+# K/V/index_k gather workers, the rows above run the block selection and sparse attention. Two rows (22 cores on
+# the 11x10 galaxy grid) hold high_bw_all_gather's 4-worker tier at 2 links (2 x 2 x (4 workers + 1 mux) = 20);
+# the tier is picked from the capacity-sized gather bytes, so the strip pins it at every capacity.
+MSA_GATHER_ROWS = 2
+
+
+@dataclass
+class MsaOverlap:
+    """The sub-device split for the packed-forward MSA overlap and the gather's persistent semaphores."""
+
+    manager_id: object
+    compute_sd_id: ttnn.SubDeviceId
+    gather_sd_id: ttnn.SubDeviceId
+    compute_cores: ttnn.CoreRangeSet
+    gather_cores: ttnn.CoreRangeSet
+    ready_semaphore: object
+    data_valid_semaphore: object
+    grid: tuple  # (x, y) of the compute grid
+    compute_rows: int
+    loaded: bool = False
 
 
 class CCLManager:
@@ -36,6 +61,9 @@ class CCLManager:
         # Persistent worst-case outputs for high_bw_all_gather (MSA K/V/index_k SP gathers), one per
         # (key, shape, dtype), shared across layers/chunks. See get_high_bw_gather_buffer.
         self._high_bw_gather_buffers = {}
+
+        # The packed-forward overlap's sub-device manager and semaphores, created on first use. See get_msa_overlap.
+        self._msa_overlap = None
 
         # Setup semaphores
         self._init_subdevice()
@@ -178,6 +206,65 @@ class CCLManager:
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
         return self._high_bw_gather_buffers[cache_key]
+
+    def get_msa_overlap(self) -> MsaOverlap:
+        """The MSA overlap resources (MSA_GATHER_ROWS), created once per mesh: a second sub-device manager next to
+        the MoE's (tt/moe/shared_overlap.py; managers coexist, one is loaded at a time) plus the gather's two
+        global semaphores on the gather strip. Semaphores go to L1_SMALL like the op's own, so the window adds
+        nothing to the L1 the compute ops see. release_msa_overlap() must run before the mesh is closed."""
+        if self._msa_overlap is None:
+            mesh = self.mesh_device
+            grid = self.compute_grid_size
+            compute_rows = grid.y - MSA_GATHER_ROWS
+            assert compute_rows > 0, f"grid {grid.x}x{grid.y} too small for a {MSA_GATHER_ROWS}-row gather strip"
+            compute = ttnn.CoreRangeSet(
+                {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(grid.x - 1, compute_rows - 1))}
+            )
+            gather = ttnn.CoreRangeSet(
+                {ttnn.CoreRange(ttnn.CoreCoord(0, compute_rows), ttnn.CoreCoord(grid.x - 1, grid.y - 1))}
+            )
+            manager_id = mesh.create_sub_device_manager([ttnn.SubDevice([compute]), ttnn.SubDevice([gather])], 0)
+            try:
+                l1_small = ttnn.get_memory_view(mesh, ttnn.BufferType.L1_SMALL).total_bytes_per_bank > 0
+                sem_type = ttnn.BufferType.L1_SMALL if l1_small else ttnn.BufferType.L1
+                ready = ttnn.create_global_semaphore(mesh, gather, 0, sem_type)
+                data_valid = ttnn.create_global_semaphore(mesh, gather, 0, sem_type)
+                ttnn.synchronize_device(mesh)
+            except Exception:
+                mesh.remove_sub_device_manager(manager_id)
+                raise
+            self._msa_overlap = MsaOverlap(
+                manager_id=manager_id,
+                compute_sd_id=ttnn.SubDeviceId(0),
+                gather_sd_id=ttnn.SubDeviceId(1),
+                compute_cores=compute,
+                gather_cores=gather,
+                ready_semaphore=ready,
+                data_valid_semaphore=data_valid,
+                grid=(grid.x, grid.y),
+                compute_rows=compute_rows,
+            )
+            logger.info(
+                f"MSA overlap: compute {compute.num_cores()} cores (rows 0-{compute_rows - 1}), "
+                f"gather {gather.num_cores()} cores (rows {compute_rows}-{grid.y - 1}), semaphores in {sem_type}"
+            )
+        return self._msa_overlap
+
+    def release_msa_overlap(self) -> None:
+        """Remove the MSA overlap manager (clearing it first if it is loaded). Idempotent; the next
+        get_msa_overlap() re-creates it. A manager left registered at mesh close can segfault the teardown."""
+        ov = self._msa_overlap
+        if ov is None:
+            return
+        mesh = self.mesh_device
+        if ov.loaded:
+            mesh.clear_loaded_sub_device_manager()
+            ov.loaded = False
+        ttnn.synchronize_device(mesh)
+        ttnn.reset_global_semaphore_value(ov.ready_semaphore, 0)
+        ttnn.reset_global_semaphore_value(ov.data_valid_semaphore, 0)
+        mesh.remove_sub_device_manager(ov.manager_id)
+        self._msa_overlap = None
 
     def reset_global_semaphores(self):
         """Reset all global semaphores to 0"""
