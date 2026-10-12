@@ -930,6 +930,8 @@ ttnn::Tensor launch_indexer_score(
     bool allow_subshard,
     std::optional<uint32_t> block_cyclic_sp_axis,
     std::optional<uint32_t> block_cyclic_chunk_local,
+    // One rectangle of worker cores the banded schedule is planned over; nullopt = the whole compute grid.
+    std::optional<tt::tt_metal::CoreRangeSet> sub_core_grids = std::nullopt,
     bool block_cyclic_cache_tp_sharded = false,  // MSA frontend never TP-shards; DSA passes it through
     // Fused ring (all-gather subsumed): k is the gathered [B,1,T,D] persistent output buffer, k_local is this
     // chip's SP shard = the all-gather INPUT, fused_ring carries the AG config. Both nullopt = the classic path.
@@ -945,8 +947,7 @@ ttnn::Tensor launch_indexer_score(
     // layer terms below (see tensor_args_t::cache_batch_idx_tensor). nullopt = the scalar path.
     std::optional<ttnn::Tensor> cache_batch_idx_tensor = std::nullopt,
     uint32_t index_cache_num_layers = 1,
-    uint32_t index_cache_layer_idx = 0,
-    std::optional<tt::tt_metal::CoreRangeSet> sub_core_grids = std::nullopt) {
+    uint32_t index_cache_layer_idx = 0) {
     // Decompose the seq-shard axes into the SP/TP roles the validation + causal geometry below reason about.
     const auto [cluster_axis, seq_subshard_axis] = split_seq_shard_axes(seq_shard_axes, allow_subshard);
     using OperationType = ttnn::operations::experimental::indexer_score::IndexerScoreDeviceOperation;
@@ -1217,6 +1218,7 @@ ttnn::Tensor indexer_score_dsa(
         /*allow_subshard=*/true,
         block_cyclic_sp_axis,
         block_cyclic_chunk_local,
+        /*sub_core_grids=*/std::nullopt,
         block_cyclic_cache_tp_sharded);
 }
 
@@ -1261,14 +1263,6 @@ ttnn::Tensor indexer_score_msa(
         /*allow_subshard=*/false,  // MSA has no TP sub-shard
         block_cyclic_sp_axis,
         block_cyclic_chunk_local,
-        /*block_cyclic_cache_tp_sharded=*/false,
-        /*k_local=*/std::nullopt,
-        /*fused_ring=*/std::nullopt,
-        /*chunk_start_idx_tensor=*/std::nullopt,
-        /*valid_end_tensor=*/std::nullopt,
-        /*cache_batch_idx_tensor=*/std::nullopt,
-        /*index_cache_num_layers=*/1,
-        /*index_cache_layer_idx=*/0,
         std::move(sub_core_grids));
 }
 
@@ -1400,6 +1394,7 @@ ttnn::Tensor ring_indexer_score_dsa(
         /*allow_subshard=*/true,
         block_cyclic_sp_axis,
         block_cyclic_chunk_local,
+        /*sub_core_grids=*/std::nullopt,
         block_cyclic_cache_tp_sharded,
         k_local,
         fused_ring,
