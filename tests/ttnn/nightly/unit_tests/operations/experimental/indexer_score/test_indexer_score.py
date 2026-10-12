@@ -700,7 +700,7 @@ def test_indexer_score_msa_sub_core_grids_bit_identical(device):
     assert torch.equal(full, again)
 
 
-@pytest.mark.parametrize("bad", ["two_ranges", "past_grid"])
+@pytest.mark.parametrize("bad", ["two_ranges", "past_grid"], ids=["two_ranges", "past_grid"])
 def test_indexer_score_msa_sub_core_grids_rejected(device, bad, expect_error):
     grid = device.compute_with_storage_grid_size()
     cfg = ttnn.IndexerScoreProgramConfig(q_chunk_size=32, k_chunk_size=32, head_group_size=0)
