@@ -5,10 +5,10 @@
 segments (TtPrefillRuntime.prefill_segments), for a list of compositions sharing one layer set and B.
 
 A composition is one forward's segment list:
-    548864:2048,0:2048             two slots: a deep hot segment and a cold one
+    548864:2048,0:2048             two slots: a deep warm segment and a cold one
     20480:2048+22528:2048          one slot, two consecutive chunks (depth-first)
     3@141312:1024                  optional "s@" picks the token stream (default: the entry's slot index)
-Comma-separated entries map to slots 0..B'-1 in order; each "+"-joined run stays in its entry's slot.
+Comma-separated entries map to slots 0..N-1 in order (N entries); each "+"-joined run stays in its entry's slot.
 
 Before a composition runs, every slot it uses is filled up to its first segment's cached_len with real
 tokens, through packed forwards of that slot's consecutive chunks (padded with cold segments in a scratch
@@ -24,8 +24,9 @@ Env:
   BUDGET_COMPOS      ';'-separated NAME=composition                                        [required]
   BUDGET_B           segments per forward (W = B * 2048); every composition has B segments
                      [required unless BUDGET_REFERENCE=1]
-  BUDGET_CAPACITY    per-slot KV capacity in tokens                              [default: max h + 2048]
-  BUDGET_WARMUP / BUDGET_ITERS   warm-up and timed forwards per composition                [2 / 5]
+  BUDGET_CAPACITY    per-slot KV capacity in tokens, rounded up to a multiple of 2048 [default: max h + 2048]
+  BUDGET_WARMUP / BUDGET_ITERS   warm-up and timed forwards per composition; the first composition of a
+                     process gets at least 5 warm-ups                                       [2 / 5]
   BUDGET_DUMP_KV     directory: after the last composition, save each slot's [k, v, index_k] (torch)
   BUDGET_FILL        real | none. none skips the history fill and attends a ZEROED cache: shapes, gathers
                      and op costs are the real ones but the block selection is degenerate (every score
@@ -58,7 +59,7 @@ from models.demos.minimax_m3.tt.ccl import L1_SMALL_SIZE
 from models.demos.minimax_m3.utils.fabric_env import ccl_topology_from_env, fabric_config_from_env
 
 SEG = 2048
-STREAM_STRIDE = 7919
+STREAM_STRIDE = 7919  # prime: no two streams alias for any token-file length
 
 
 def emit(**kw):
@@ -170,7 +171,14 @@ def main():
         mesh = galaxy.create_submeshes(ttnn.MeshShape(8 // stages, 4))[stage] if stages > 1 else galaxy
         t0 = time.perf_counter()
         runtime, kv_cache = build(
-            mesh, layer_ids, B * SEG, None if reference else SEG, capacity, n_slots + 1, stages, stage
+            mesh,
+            layer_ids=layer_ids,
+            W=B * SEG,
+            seg=None if reference else SEG,
+            capacity=capacity,
+            num_users=n_slots + 1,
+            stages=stages,
+            stage=stage,
         )
         emit(kind="built", load_s=round(time.perf_counter() - t0, 1), mesh=list(mesh.shape))
         if PROFILE:
@@ -217,7 +225,8 @@ def main():
         depth = {}  # slot -> (stream, filled depth)
 
         def fill(slot, stream, h):
-            d = depth.get(slot, (stream, 0))[1] if depth.get(slot, (stream, 0))[0] == stream else 0
+            filled_stream, filled = depth.get(slot, (stream, 0))
+            d = filled if filled_stream == stream else 0
             todo = [] if fill_mode == "none" else [(slot, stream, p, SEG) for p in range(d, h, SEG)]
             while todo:
                 group, todo = todo[:B], todo[B:]
@@ -226,8 +235,10 @@ def main():
             depth[slot] = (stream, max(d, h))
 
         for ci, (name, spec, segs) in enumerate(compos):
+            seen = set()
             for slot, stream, h, n in segs:
-                if (slot, stream) not in [(s, st) for s, st, *_ in segs[: segs.index((slot, stream, h, n))]]:
+                if (slot, stream) not in seen:
+                    seen.add((slot, stream))
                     fill(slot, stream, h)  # history before this slot's first segment in the composition
             for k in range(max(warmup, 5) if ci == 0 else warmup):
                 emit(kind="warmup", compo=name, iter=k, wall_ms=round(run(segs), 3))
@@ -251,8 +262,11 @@ def main():
 
         topk_dump = os.getenv("BUDGET_TOPK_DUMP")
         if topk_dump:
-            # One extra untimed forward of the last composition, recording every MSA call's top-k block ids
-            # (order: packed = layer-major then segment; reference = segment-major then layer).
+            # One extra untimed forward of the last composition, recording every MSA call's top-k block ids.
+            # Order: per layer, the cold segments in forward order then the warm ones when the overlap runs
+            # (the warm ones are pipelined after the cold chains), plain forward order otherwise; the reference
+            # run records segment-major then layer. The sink reads back inside the overlap window, which
+            # serializes this forward: it is a correctness forward, never a timed one.
             import torch
 
             from models.demos.minimax_m3.tt.attention import msa

@@ -15,9 +15,9 @@ that is what excludes the warmup and cache-prefix chunks, whose ops are in the s
 
 Per zone it reports, for each device separately and then across devices:
   * device-kernel time  (sum of DEVICE KERNEL DURATION [ns])
-  * span: the wall the zone's ops occupied on the device (last FW end - first FW start, from the FW cycle
-    columns). Equal to the kernel sum when the ops ran back to back; shorter when ops of the zone ran
-    concurrently on sub-devices, which is how an overlap shows up (the kernel sum never shrinks)
+  * span: the firmware wall of the zone (last FW end - first FW start, from the FW cycle columns), dispatch
+    gaps included, so above the kernel sum even for a serial zone under tracy. An overlap shows up as the
+    span of a zone falling between a serial and a pipelined capture while the kernel sum stays put
   * op count
   * bytes moved (in + out, from the per-op shape/dtype columns) and the implied GB/s
   * DRAM BW UTIL (%) / NOC UTIL (%) means when the run used --collect-noc-traces
@@ -333,7 +333,7 @@ def aggregate_by_class(summary):
     """Sum each relative zone path over all layers of a class, and count the layers involved."""
     agg = defaultdict(
         lambda: defaultdict(
-            lambda: {"ms": 0.0, "layers": set(), "ops": 0, "mib": 0.0, "gbs": [], "dram": [], "noc": []}
+            lambda: {"ms": 0.0, "layers": set(), "ops": 0, "mib": 0.0, "gbs": [], "dram": [], "noc": [], "span": []}
         )
     )
     for zone, s in summary.items():
@@ -349,6 +349,8 @@ def aggregate_by_class(summary):
         e["mib"] += s["mib"]
         if s["gbs"]:
             e["gbs"].append(s["gbs"])
+        if s.get("span_ms_max") is not None:
+            e["span"].append(s["span_ms_max"])
         # Only present when the capture ran with --collect-noc-traces AND tt-npe is importable;
         # stays empty otherwise, which the report renders as "not measured" rather than zero.
         if s.get("dram_util") is not None:
@@ -367,6 +369,7 @@ def aggregate_by_class(summary):
                 "ops_per_layer": e["ops"] / n if n else 0,
                 "mib_per_layer": e["mib"] / n if n else 0.0,
                 "gbs_mean": sum(e["gbs"]) / len(e["gbs"]) if e["gbs"] else 0.0,
+                "span_per_layer": sum(e["span"]) / n if e["span"] and n else None,
                 "dram_util": sum(e["dram"]) / len(e["dram"]) if e["dram"] else None,
                 "noc_util": sum(e["noc"]) / len(e["noc"]) if e["noc"] else None,
             }
@@ -382,6 +385,7 @@ def print_report(summary, by_class, acc, top=0):
             f"PROFILED CHUNK — device-kernel time {total['ms_max']:.2f} ms on the worst of "
             f"{total['num_devices']} devices (dev {total['worst_device']}); "
             f"min {total['ms_min']:.2f} ms, skew {total['skew_ms']:.2f} ms; {total['ops']} ops"
+            + (f"; span {total['span_ms_max']:.2f} ms" if total.get("span_ms_max") is not None else "")
         )
     else:
         print(f"No `{ROOT_ZONE}` zone found — was M3_PROFILE_ZONES=1 set, and did the run reach the")
@@ -399,13 +403,15 @@ def print_report(summary, by_class, acc, top=0):
         print()
         print(f"--- {cls.upper()} layers ({nlayers} layer(s), {cls_total:.2f} ms total device-kernel) ---")
         print(
-            f"  {'zone':<34} {'ms/layer':>9} {'ms total':>9} {'% class':>8} " f"{'ops/L':>6} {'MiB/L':>9} {'GB/s':>8}"
+            f"  {'zone':<34} {'ms/layer':>9} {'span/L':>8} {'ms total':>9} {'% class':>8} "
+            f"{'ops/L':>6} {'MiB/L':>9} {'GB/s':>8}"
         )
-        print(f"  {'-'*34} {'-'*9} {'-'*9} {'-'*8} {'-'*6} {'-'*9} {'-'*8}")
+        print(f"  {'-'*34} {'-'*9} {'-'*8} {'-'*9} {'-'*8} {'-'*6} {'-'*9} {'-'*8}")
         for rel, v in sorted(rels.items(), key=lambda kv: -kv[1]["ms_total"]):
             pct = (100.0 * v["ms_total"] / cls_total) if cls_total else 0.0
+            span = f"{v['span_per_layer']:.3f}" if v.get("span_per_layer") is not None else "-"
             print(
-                f"  {rel:<34} {v['ms_per_layer']:>9.3f} {v['ms_total']:>9.2f} {pct:>7.1f}% "
+                f"  {rel:<34} {v['ms_per_layer']:>9.3f} {span:>8} {v['ms_total']:>9.2f} {pct:>7.1f}% "
                 f"{v['ops_per_layer']:>6.1f} {v['mib_per_layer']:>9.1f} {v['gbs_mean']:>8.1f}"
             )
 
