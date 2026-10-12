@@ -51,14 +51,14 @@ inline void calculate_dropout(uint probability, uint scale) {
         TTI_SFPIADD(0, p_sfpu::LREG2, p_sfpu::LREG3, 10);
         TTI_SFPMOV(0, p_sfpu::LCONST_0, p_sfpu::LREG0, 0);
         TTI_SFPENCC(0, 0, 0, 0);
-        TTI_SFPSTORE(0, InstrModLoadStore::DEFAULT, ADDR_MOD_7, 0);
-
-        sfpi::dst_reg++;
+        // ADDR_MOD_6 (dropout_init) steps DEST to the next row on the store.
+        TTI_SFPSTORE(0, InstrModLoadStore::DEFAULT, ADDR_MOD_6, 0);
     }
 }
 
 template <bool APPROXIMATION_MODE>
 inline void dropout_init(const uint seed) {
+    addr_mod_t{.srca = {.incr = 0}, .srcb = {.incr = 0}, .dest = {.incr = 2}}.set(ADDR_MOD_6);
     math::reset_counters(p_setrwc::SET_ABD_F);
     init_prng_seed_sfpu(seed);
 }
