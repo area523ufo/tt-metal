@@ -120,7 +120,7 @@ def _random_attention(mesh_device, is_sparse, total):
 
 @parametrize_mesh_with_fabric(mesh_shapes=[(8, 4)], linear_fabric=True)
 @pytest.mark.parametrize("chunk_local", [640], ids=["chunk640"])  # chunk=5120; 2 chunks -> T=10240 (40 blocks)
-@pytest.mark.parametrize("layer_kind", ["dense", "sparse"])
+@pytest.mark.parametrize("layer_kind", ["dense", "sparse"], ids=["dense", "sparse"])
 def test_attention_chunked(mesh_device, device_params, layer_kind, chunk_local, reset_seeds):
     rows, cols = tuple(mesh_device.shape)
     assert (rows, cols) == (8, 4)
@@ -188,7 +188,7 @@ def test_attention_chunked(mesh_device, device_params, layer_kind, chunk_local, 
 @pytest.mark.parametrize(
     "chunk_local", [256], ids=["chunk256"]
 )  # chunk=2048, T=4096 (32 blocks) — keeps the fp32 CPU ref fast
-@pytest.mark.parametrize("layer_kind", ["dense", "sparse"])
+@pytest.mark.parametrize("layer_kind", ["dense", "sparse"], ids=["dense", "sparse"])
 def test_attention_chunked_vs_cpu_ref(mesh_device, device_params, layer_kind, chunk_local, reset_seeds):
     """Chunked-prefill chunk-1 output vs the self-contained torch CPU reference (absolute correctness).
 
@@ -344,7 +344,7 @@ def test_attention_chunked_vs_cpu_ref(mesh_device, device_params, layer_kind, ch
 
 
 @parametrize_mesh_with_fabric(mesh_shapes=[(8, 4)], linear_fabric=True)
-@pytest.mark.parametrize("layer_kind", ["dense", "sparse"])
+@pytest.mark.parametrize("layer_kind", ["dense", "sparse"], ids=["dense", "sparse"])
 def test_attention_packed_segments(mesh_device, device_params, layer_kind, reset_seeds, monkeypatch):
     """One packed forward of three users' segments (two with a cached chunk, one cold) against the three per-chunk
     calls, both with the indexed RoPE the runtime uses. On the sparse layer the two warm segments take the
