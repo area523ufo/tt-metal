@@ -4,7 +4,7 @@
 """M3 prefill budget study, packed forwards: host wall time of one forward that packs B 2048-token
 segments (TtPrefillRuntime.prefill_segments), for a list of compositions sharing one layer set and B.
 
-A composition is one forward's segment list, written as in the study doc:
+A composition is one forward's segment list:
     548864:2048,0:2048             two slots: a deep hot segment and a cold one
     20480:2048+22528:2048          one slot, two consecutive chunks (depth-first)
     3@141312:1024                  optional "s@" picks the token stream (default: the entry's slot index)
@@ -16,13 +16,15 @@ slot). Fill depth is remembered per slot, so compositions sharing a history do n
 stream s at position p is token_ids[(p + 7919 * s) % len].
 
 BUDGET_REFERENCE=1 instead runs every segment alone through the ORIGINAL path (prefill_chunk,
-chunk_size = segment size, no segment_size) — the correctness reference for the packed path.
+chunk_size = segment size, no segment_size) — the correctness reference for the packed path: dump both runs
+with BUDGET_DUMP_KV and compare the slots' K/V/index_k over the real positions (PCC per layer).
 
 Env:
   BUDGET_LAYER_IDS   global layer indices                                                  [required]
   BUDGET_COMPOS      ';'-separated NAME=composition                                        [required]
-  BUDGET_B           segments per forward (W = B * 2048); every composition has B segments   [required]
-  BUDGET_CAPACITY    per-slot KV capacity in tokens                        [default: max needed + 2048]
+  BUDGET_B           segments per forward (W = B * 2048); every composition has B segments
+                     [required unless BUDGET_REFERENCE=1]
+  BUDGET_CAPACITY    per-slot KV capacity in tokens                              [default: max h + 2048]
   BUDGET_WARMUP / BUDGET_ITERS   warm-up and timed forwards per composition                [2 / 5]
   BUDGET_DUMP_KV     directory: after the last composition, save each slot's [k, v, index_k] (torch)
   BUDGET_FILL        real | none. none skips the history fill and attends a ZEROED cache: shapes, gathers
@@ -286,6 +288,9 @@ def main():
             emit(kind="dumped", dir=dump, slots=n_slots)
         emit(kind="done")
     finally:
+        # A sub-device manager left registered at close can segfault the teardown.
+        if "runtime" in locals():
+            runtime.release_sub_device_managers()
         for sub in galaxy.get_submeshes():
             ttnn.close_mesh_device(sub)
         ttnn.close_mesh_device(galaxy)

@@ -15,10 +15,10 @@ A timed forward is `prefill_chunk` + `synchronize_device`; nothing syncs inside 
 re-written by every iteration and by the next fill, so points can share one process. No zone profiler
 and no device profiler: this is the timing harness, profile_prefill.py is the profiling one.
 
-Constraint on main: h must be a multiple of W (the block-cyclic SP cache has period W).
+h must be a multiple of W: this harness sets no segment_size, so the block-cyclic SP cache has period W.
 
-Output: one `RESULT {json}` line per fill chunk, timed iteration and point summary, parsed by
-budget_collect.py.
+Output: one `RESULT {json}` line per fill chunk, timed iteration and point summary (`kind` = fill | warmup |
+iter | point | done), greppable from the log.
 
 Env:
   BUDGET_LAYER_IDS   global layer indices, e.g. 0,1,2 (D) or 8,...,15 (S8)                [required]
@@ -39,8 +39,6 @@ import resource
 import statistics
 import sys
 import time
-
-from loguru import logger  # noqa: F401
 
 import ttnn
 from models.demos.minimax_m3.tt.ccl import L1_SMALL_SIZE
@@ -176,6 +174,9 @@ def main():
             )
         emit(kind="done")
     finally:
+        # A sub-device manager left registered at close can segfault the teardown.
+        if "runtime" in locals():
+            runtime.release_sub_device_managers()
         for sub in galaxy.get_submeshes():
             ttnn.close_mesh_device(sub)
         ttnn.close_mesh_device(galaxy)
