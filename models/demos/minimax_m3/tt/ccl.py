@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from loguru import logger
@@ -17,7 +17,8 @@ L1_SMALL_SIZE = 1152
 
 # Packed-forward MSA overlap (tt/attention/msa.py msa_segments_pipelined): the bottom rows of the grid carry the
 # K/V/index_k gather workers, the rows above run the block selection and sparse attention. Two rows (22-24 cores
-# on the galaxy grids) hold high_bw_all_gather's 4-worker tier at 2 links (get_msa_overlap checks it).
+# on the galaxy grids) hold high_bw_all_gather's 4-worker tier at 2 links (get_msa_overlap checks it). The op
+# test of the schedule carves the same strip (tests/ttnn/.../test_high_bw_all_gather.py _msa_overlap_grids).
 MSA_GATHER_ROWS = 2
 
 
@@ -27,20 +28,20 @@ class MsaOverlap:
 
     The gather gets caller-owned semaphores because the op's own pair is allocated per cached program with a
     mesh synchronize, which would stall the host inside the window and spend two more L1_SMALL pages per program.
-    ``window()`` is the only way in: it loads the manager, clears it on the way out (a device-side join of both
-    sub-devices) and, if the window raised, drains and zeroes the semaphores so the next window never inherits
-    what an aborted gather left in them.
+    ``window()`` is the only way in: it loads the manager, clears it on the way out (the manager switch drains
+    both sub-devices, so that is the join) and, if the window raised, zeroes the semaphores so the next window
+    never inherits what an aborted gather left in them. ``join()`` is the in-window join the schedule relies on.
     """
 
     mesh_device: ttnn.MeshDevice
-    manager_id: object
+    manager_id: ttnn.SubDeviceManagerId
     compute_sd_id: ttnn.SubDeviceId
     gather_sd_id: ttnn.SubDeviceId
     compute_cores: ttnn.CoreRangeSet
     gather_cores: ttnn.CoreRangeSet
-    ready_semaphore: ttnn._ttnn.global_semaphore.global_semaphore
-    data_valid_semaphore: ttnn._ttnn.global_semaphore.global_semaphore
-    _loaded: bool = False
+    ready_semaphore: object  # the handle ttnn.create_global_semaphore returns
+    data_valid_semaphore: object
+    _loaded: bool = field(default=False, init=False, repr=False)
 
     @contextmanager
     def window(self):
@@ -50,14 +51,19 @@ class MsaOverlap:
         try:
             yield self
         except BaseException:
-            self._clear()
-            ttnn.synchronize_device(mesh)
+            self._clear()  # drains both sub-devices: nothing touches the semaphores after this
             ttnn.reset_global_semaphore_value(self.ready_semaphore, 0)
             ttnn.reset_global_semaphore_value(self.data_valid_semaphore, 0)
-            ttnn.synchronize_device(mesh)
+            ttnn.synchronize_device(mesh)  # the zeroes land before the next window's first gather
             raise
         else:
             self._clear()
+
+    def join(self):
+        """Device-side join inside the window: the in-order dispatcher records the event only after every
+        program queued on either sub-device has finished, so the next program waits for all of them. Nothing
+        waits on the event itself. Eager only: trace capture rejects the record."""
+        ttnn.record_event(self.mesh_device, sub_device_ids=[self.compute_sd_id, self.gather_sd_id])
 
     def _clear(self):
         if self._loaded:
@@ -252,7 +258,8 @@ class CCLManager:
                 {ttnn.CoreRange(ttnn.CoreCoord(0, compute_rows), ttnn.CoreCoord(grid.x - 1, grid.y - 1))}
             )
             # high_bw_all_gather's worker tier is picked from the gather bytes and snapped down to what the strip
-            # holds; the strip must at least fit the 4-worker tier (4 workers + 1 mux per direction per link).
+            # holds (a performance floor: the op accepts smaller strips with a warning, down to one worker). The
+            # strip must fit the 4-worker tier: 4 workers + 1 mux per direction per link.
             needed = self.num_links * 2 * (4 + 1)
             assert (
                 gather.num_cores() >= needed

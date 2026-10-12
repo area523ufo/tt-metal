@@ -12,9 +12,9 @@ from .config import AttentionConfig, ProgramConfig
 from .dense_sp import dense_sp_attention, dense_sp_attention_nocache
 from .kv_cache import write_index_k_chunk, write_kv_chunk
 from .msa import (
-    MSA_SEGMENT_OVERLAP,
+    MsaSegment,
     index_branch_forward,
-    msa_segments_overlap_possible,
+    msa_overlap_segments,
     msa_segments_pipelined,
     msa_sp_attention_cache_read,
     msa_sp_attention_nocache,
@@ -121,7 +121,7 @@ def attention_forward(
             program_config,
             transformation_mat,
             ccl_manager,
-            slot=user_id,
+            user=user_id,
             batch_size=batch_size,
             layer_idx=layer_idx,
             cached_len=cached_len,
@@ -199,7 +199,7 @@ class _PreAttn:
     v: ttnn.Tensor
     index_q: ttnn.Tensor  # MSA layers only
     index_k: ttnn.Tensor  # MSA layers only
-    slot: int
+    user: int  # cache user slot
     cached_len: int
     s_local: int
 
@@ -222,7 +222,7 @@ def _attention_core(
     transformation_mat,
     ccl_manager,
     *,
-    slot,
+    user,
     batch_size,
     layer_idx,
     cached_len,
@@ -240,7 +240,7 @@ def _attention_core(
         config,
         mesh_config,
         transformation_mat,
-        slot=slot,
+        user=user,
         batch_size=batch_size,
         layer_idx=layer_idx,
         cached_len=cached_len,
@@ -252,6 +252,17 @@ def _attention_core(
     )
     pre.release()
     return _attention_post(tt_sdpa_out)
+
+
+def _msa_op_kwargs(config, mesh_config):
+    """The MSA chain's op parameters: the attention scale, the block size, the top-k and the local KV heads
+    (one GQA group per KV head)."""
+    return dict(
+        scale=config.head_dim**-0.5,
+        block_size=config.msa_block_size,
+        topk_blocks=config.msa_topk_blocks,
+        num_groups=mesh_config.shard_size(config.num_kv_heads),
+    )
 
 
 def _segment_rows(t, i, s_local):
@@ -284,7 +295,7 @@ def _attention_packed(
     before that window. Consumes xqkv_fused (and hidden_states on MSA layers)."""
     s_local = total_seq_len // len(segments)
     pres = []
-    for i, (slot, seg_cached_len) in enumerate(segments):
+    for i, (user, seg_cached_len) in enumerate(segments):
         pres.append(
             _attention_pre(
                 _segment_rows(xqkv_fused, i, s_local),
@@ -295,7 +306,7 @@ def _attention_packed(
                 config,
                 mesh_config,
                 transformation_mat,
-                slot=slot,
+                user=user,
                 batch_size=1,
                 layer_idx=layer_idx,
                 cached_len=seg_cached_len,
@@ -307,34 +318,23 @@ def _attention_packed(
     if config.is_sparse:
         hidden_states.deallocate(True)
     outs = [None] * len(pres)
-    warm = [i for i, p in enumerate(pres) if p.cached_len > 0] if config.is_sparse else []
-    overlap = (
-        MSA_SEGMENT_OVERLAP
-        and kv_cache is not None
-        and msa_segments_overlap_possible([pres[i] for i in warm], mesh_config, ccl_manager)
-    )
+    warm = msa_overlap_segments(pres, kv_cache, mesh_config, ccl_manager) if config.is_sparse else []
     for i, pre in enumerate(pres):
-        if overlap and i in warm:
-            continue
-        outs[i] = _attention_attend(
-            pre, kv_cache, config, mesh_config, mesh_device, program_config, ccl_manager, layer_idx
-        )
-    if overlap:
+        if i not in warm:
+            outs[i] = _attention_attend(
+                pre, kv_cache, config, mesh_config, mesh_device, program_config, ccl_manager, layer_idx
+            )
+    if warm:
         pipelined = msa_segments_pipelined(
-            [pres[i] for i in warm],
+            [MsaSegment(pres[i].q, pres[i].index_q, pres[i].user, pres[i].cached_len, pres[i].s_local) for i in warm],
             kv_cache=kv_cache,
             layer_idx=layer_idx,
             mesh_config=mesh_config,
             ccl_manager=ccl_manager,
-            scale=config.head_dim**-0.5,
-            block_size=config.msa_block_size,
-            topk_blocks=config.msa_topk_blocks,
-            num_groups=mesh_config.shard_size(config.num_kv_heads),
+            **_msa_op_kwargs(config, mesh_config),
         )
-        for i, out_rm in zip(warm, pipelined):
-            with zone("sparse_sdpa"):
-                outs[i] = ttnn.to_layout(out_rm, ttnn.TILE_LAYOUT)
-            out_rm.deallocate(True)
+        for i, out in zip(warm, pipelined):
+            outs[i] = out
     for i, pre in enumerate(pres):
         pre.release()
         outs[i] = _attention_post(outs[i])
@@ -354,7 +354,7 @@ def _attention_pre(
     mesh_config,
     transformation_mat,
     *,
-    slot,
+    user,
     batch_size,
     layer_idx,
     cached_len,
@@ -422,7 +422,7 @@ def _attention_pre(
                 kv_cache,
                 tt_k,
                 tt_v,
-                slot_idx=slot,
+                slot_idx=user,
                 layer_idx=layer_idx,
                 kv_actual=cached_len,
                 sp_axis=mesh_config.sp_axis,
@@ -449,19 +449,18 @@ def _attention_pre(
                 write_index_k_chunk(
                     kv_cache,
                     tt_ik,
-                    slot_idx=slot,
+                    slot_idx=user,
                     layer_idx=layer_idx,
                     kv_actual=cached_len,
                     sp_axis=mesh_config.sp_axis,
                 )
-    return _PreAttn(tt_q, tt_k, tt_v, tt_iq, tt_ik, slot, cached_len, s_local)
+    return _PreAttn(tt_q, tt_k, tt_v, tt_iq, tt_ik, user, cached_len, s_local)
 
 
 def _attention_attend(pre, kv_cache, config, mesh_config, mesh_device, program_config, ccl_manager, layer_idx):
     """The attention op for one chunk's heads -> [1, Hq_local, s_local, head_dim] (tiled)."""
     tt_q, tt_k, tt_v, tt_iq, tt_ik = pre.q, pre.k, pre.v, pre.index_q, pre.index_k
-    slot, cached_len, s_local = pre.slot, pre.cached_len, pre.s_local
-    num_local_kv_heads = mesh_config.shard_size(config.num_kv_heads)
+    user, cached_len, s_local = pre.user, pre.cached_len, pre.s_local
 
     # Per-layer gate (config.is_sparse from M3 sparse_attention_freq):
     #   MSA layers: block-sparse SP attention over the gathered K/V/index_k, q/index_q SP-sharded (s_local rows
@@ -475,7 +474,7 @@ def _attention_attend(pre, kv_cache, config, mesh_config, mesh_device, program_c
             # Cache-read: the current chunk attends the accumulated prefix, gathered across SP straight
             # from this (user, layer) slot of the packed cache (msa_sp_attention_cache_read). cached_len may be
             # mid-slab (a 32-aligned multi-turn resume); the read sizes the gather for the fullest rank.
-            cache_slot = slot * kv_cache.num_layers + layer_idx
+            cache_slot = kv_cache.slot(user, layer_idx)
             return msa_sp_attention_cache_read(
                 tt_q,
                 tt_iq,
@@ -485,10 +484,7 @@ def _attention_attend(pre, kv_cache, config, mesh_config, mesh_device, program_c
                 ccl_manager=ccl_manager,
                 cached_len=cached_len,
                 chunk_local=s_local,  # current chunk per-chip rows
-                scale=config.head_dim**-0.5,
-                block_size=config.msa_block_size,
-                topk_blocks=config.msa_topk_blocks,
-                num_groups=num_local_kv_heads,
+                **_msa_op_kwargs(config, mesh_config),
             )
         return msa_sp_attention_nocache(
             tt_q,
@@ -500,10 +496,7 @@ def _attention_attend(pre, kv_cache, config, mesh_config, mesh_device, program_c
             ccl_manager=ccl_manager,
             cached_len=0,
             s_local=s_local,
-            scale=config.head_dim**-0.5,
-            block_size=config.msa_block_size,
-            topk_blocks=config.msa_topk_blocks,
-            num_groups=num_local_kv_heads,
+            **_msa_op_kwargs(config, mesh_config),
         )
     if config.sequence_parallel:
         # SP dense (first chunk, no prior cache): ring_joint over the chunk's own SP-sharded K/V, each
@@ -548,7 +541,7 @@ def _attention_attend(pre, kv_cache, config, mesh_config, mesh_device, program_c
                     compute_kernel_config=sp_kcfg,
                     scale=config.head_dim**-0.5,
                     cluster_axis=mesh_config.sp_axis,
-                    slot_idx=slot,
+                    slot_idx=user,
                     layer_idx=layer_idx,
                     num_layers=kv_cache.num_layers,
                     write_chunk=False,
