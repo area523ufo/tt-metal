@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -15,26 +16,53 @@ import ttnn
 L1_SMALL_SIZE = 1152
 
 # Packed-forward MSA overlap (tt/attention/msa.py msa_segments_pipelined): the bottom rows of the grid carry the
-# K/V/index_k gather workers, the rows above run the block selection and sparse attention. Two rows (22 cores on
-# the 11x10 galaxy grid) hold high_bw_all_gather's 4-worker tier at 2 links (2 x 2 x (4 workers + 1 mux) = 20);
-# the tier is picked from the capacity-sized gather bytes, so the strip pins it at every capacity.
+# K/V/index_k gather workers, the rows above run the block selection and sparse attention. Two rows (22-24 cores
+# on the galaxy grids) hold high_bw_all_gather's 4-worker tier at 2 links (get_msa_overlap checks it).
 MSA_GATHER_ROWS = 2
 
 
 @dataclass
 class MsaOverlap:
-    """The sub-device split for the packed-forward MSA overlap and the gather's persistent semaphores."""
+    """The sub-device split for the packed-forward MSA overlap and the gather's persistent semaphores.
 
+    The gather gets caller-owned semaphores because the op's own pair is allocated per cached program with a
+    mesh synchronize, which would stall the host inside the window and spend two more L1_SMALL pages per program.
+    ``window()`` is the only way in: it loads the manager, clears it on the way out (a device-side join of both
+    sub-devices) and, if the window raised, drains and zeroes the semaphores so the next window never inherits
+    what an aborted gather left in them.
+    """
+
+    mesh_device: ttnn.MeshDevice
     manager_id: object
     compute_sd_id: ttnn.SubDeviceId
     gather_sd_id: ttnn.SubDeviceId
     compute_cores: ttnn.CoreRangeSet
     gather_cores: ttnn.CoreRangeSet
-    ready_semaphore: object
-    data_valid_semaphore: object
-    grid: tuple  # (x, y) of the compute grid
-    compute_rows: int
-    loaded: bool = False
+    ready_semaphore: ttnn._ttnn.global_semaphore.global_semaphore
+    data_valid_semaphore: ttnn._ttnn.global_semaphore.global_semaphore
+    _loaded: bool = False
+
+    @contextmanager
+    def window(self):
+        mesh = self.mesh_device
+        mesh.load_sub_device_manager(self.manager_id)
+        self._loaded = True
+        try:
+            yield self
+        except BaseException:
+            self._clear()
+            ttnn.synchronize_device(mesh)
+            ttnn.reset_global_semaphore_value(self.ready_semaphore, 0)
+            ttnn.reset_global_semaphore_value(self.data_valid_semaphore, 0)
+            ttnn.synchronize_device(mesh)
+            raise
+        else:
+            self._clear()
+
+    def _clear(self):
+        if self._loaded:
+            self.mesh_device.clear_loaded_sub_device_manager()
+            self._loaded = False
 
 
 class CCLManager:
@@ -223,7 +251,15 @@ class CCLManager:
             gather = ttnn.CoreRangeSet(
                 {ttnn.CoreRange(ttnn.CoreCoord(0, compute_rows), ttnn.CoreCoord(grid.x - 1, grid.y - 1))}
             )
-            manager_id = mesh.create_sub_device_manager([ttnn.SubDevice([compute]), ttnn.SubDevice([gather])], 0)
+            # high_bw_all_gather's worker tier is picked from the gather bytes and snapped down to what the strip
+            # holds; the strip must at least fit the 4-worker tier (4 workers + 1 mux per direction per link).
+            needed = self.num_links * 2 * (4 + 1)
+            assert (
+                gather.num_cores() >= needed
+            ), f"gather strip of {gather.num_cores()} cores holds no 4-worker tier ({needed} needed)"
+            manager_id = mesh.create_sub_device_manager(
+                [ttnn.SubDevice([compute]), ttnn.SubDevice([gather])], 0
+            )  # 0 = local L1 size
             try:
                 l1_small = ttnn.get_memory_view(mesh, ttnn.BufferType.L1_SMALL).total_bytes_per_bank > 0
                 sem_type = ttnn.BufferType.L1_SMALL if l1_small else ttnn.BufferType.L1
@@ -234,6 +270,7 @@ class CCLManager:
                 mesh.remove_sub_device_manager(manager_id)
                 raise
             self._msa_overlap = MsaOverlap(
+                mesh_device=mesh,
                 manager_id=manager_id,
                 compute_sd_id=ttnn.SubDeviceId(0),
                 gather_sd_id=ttnn.SubDeviceId(1),
@@ -241,8 +278,6 @@ class CCLManager:
                 gather_cores=gather,
                 ready_semaphore=ready,
                 data_valid_semaphore=data_valid,
-                grid=(grid.x, grid.y),
-                compute_rows=compute_rows,
             )
             logger.info(
                 f"MSA overlap: compute {compute.num_cores()} cores (rows 0-{compute_rows - 1}), "
@@ -256,18 +291,16 @@ class CCLManager:
         ov = self._msa_overlap
         if ov is None:
             return
-        mesh = self.mesh_device
-        if ov.loaded:
-            mesh.clear_loaded_sub_device_manager()
-            ov.loaded = False
-        ttnn.synchronize_device(mesh)
-        ttnn.reset_global_semaphore_value(ov.ready_semaphore, 0)
-        ttnn.reset_global_semaphore_value(ov.data_valid_semaphore, 0)
-        mesh.remove_sub_device_manager(ov.manager_id)
+        ov._clear()
+        ttnn.synchronize_device(self.mesh_device)
+        self.mesh_device.remove_sub_device_manager(ov.manager_id)
         self._msa_overlap = None
 
     def reset_global_semaphores(self):
         """Reset all global semaphores to 0"""
+        if self._msa_overlap is not None:
+            ttnn.reset_global_semaphore_value(self._msa_overlap.ready_semaphore, 0)
+            ttnn.reset_global_semaphore_value(self._msa_overlap.data_valid_semaphore, 0)
         for sem in self.rs_ping_pong_semaphores:
             ttnn.reset_global_semaphore_value(sem, 0)
         for sem in self.ag_ping_pong_semaphores:

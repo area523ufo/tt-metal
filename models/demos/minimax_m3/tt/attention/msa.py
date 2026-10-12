@@ -24,7 +24,6 @@ uniform across SP devices (no per-device offset needed). Causality is encoded en
 selection; sparse_sdpa_msa applies no token mask.
 """
 
-from loguru import logger
 
 import ttnn
 from models.demos.minimax_m3.utils.profiler_utils import FINE, zone
@@ -37,12 +36,13 @@ from .operations import apply_qk_norm_per_head, apply_rope
 MSA_KV_BLOCK_CACHE = True
 
 # Packed forwards (prefill_segments): gather the next warm segment's K/V/index_k prefix on a strip of cores while
-# this segment's block selection and sparse_sdpa_msa run on the rest (CCLManager.get_msa_overlap). Output is
-# identical to the serial chain. Needs at least two warm segments in the forward.
+# this segment's block selection and sparse_sdpa_msa run on the rest (CCLManager.get_msa_overlap). A warm segment
+# has cached_len > 0: it attends a cache prefix and needs the gather; a cold one (cached_len == 0) attends only
+# itself. Output is identical to the serial chain. Needs at least two warm segments in the forward. Eager only: the
+# device-side join is an event record, which trace capture rejects.
 MSA_SEGMENT_OVERLAP = True
 
-# indexer_score_msa's program config and the banded schedule it implies (indexer_score_work_split.hpp): the op
-# takes no core grid, so the overlap window can only hold it if its rows fit the compute sub-device.
+# indexer_score_msa's work units: q rows per group, keys per band (tokens).
 INDEXER_Q_CHUNK, INDEXER_K_CHUNK = 64, 1024
 
 
@@ -146,6 +146,16 @@ def index_branch_forward(
     return iq, ik
 
 
+# Debug hook (default off): called with every MSA call's top-k block ids, e.g. to compare block selection
+# between two runs. Set with set_block_id_sink(fn) / set_block_id_sink(None).
+_block_id_sink = None
+
+
+def set_block_id_sink(fn):
+    global _block_id_sink
+    _block_id_sink = fn
+
+
 def msa_select_blocks(
     index_q,
     index_k,
@@ -162,8 +172,7 @@ def msa_select_blocks(
     overlap=None,
 ):
     """Indexer scores + top-k -> block ids [1, num_groups, Sq, topk] (uint32, row-major). Arguments as for
-    msa_indexer_sparse. ``overlap`` confines the top-k to the compute sub-device (the indexer needs no
-    confinement: its banded schedule stays inside the compute rows, see indexer_rows_used)."""
+    msa_indexer_sparse. ``overlap`` confines the indexer and the top-k to the compute sub-device."""
     # Block scores: scaled dot, causal -inf for future, group-sum, block-max-pool. bf16 row-major out.
     with zone("indexer"):
         block_scores = ttnn.experimental.indexer_score_msa(
@@ -180,6 +189,7 @@ def msa_select_blocks(
             block_cyclic_sp_axis=block_cyclic_sp_axis,
             block_cyclic_chunk_local=block_cyclic_chunk_local,
             kv_len=kv_len,
+            sub_core_grids=overlap.compute_cores if overlap is not None else None,
         )
 
         # Top-k block ids (uint32 row-major) — the block selection that encodes causality. The op already
@@ -214,9 +224,9 @@ def msa_sparse_attend(
 ):
     """sparse_sdpa_msa over the selected blocks: row-major q in, row-major out [1, Hq, Sq, head_dim]. The caller
     owns the layout conversions (the overlap window admits only ops that stay on one sub-device)."""
-    # sparse_sdpa_msa (#48700): q + block-ids row-major, K/V tiled; expands blocks->tokens internally.
-    # chunk_start_idx + cluster_axis drive the token-level diagonal-block causal mask with the per-device
-    # SP start (chunk_start = chunk_start_idx + rank*Sq); q must be bf16 (the op rejects fp8 q under causal).
+    # sparse_sdpa_msa: q + block-ids row-major, K/V tiled; expands blocks->tokens internally. chunk_start_idx +
+    # cluster_axis drive the token-level diagonal-block causal mask with the per-device SP start (chunk_start =
+    # chunk_start_idx + rank*Sq); q must be bf16 (the op rejects fp8 q under causal).
     return ttnn.transformer.sparse_sdpa_msa(
         q_rm,
         k,
@@ -256,15 +266,13 @@ def msa_indexer_sparse(
 
     index_q [1, num_groups, Sq, index_dim]   index_k [1, 1, T, index_dim]   (1 shared index-k head)
     q       [1, Hq, Sq, head_dim]            k, v    [1, n_kv, T, head_dim]  (TILE layout)
-    cluster_axis: when set, the merged op derives a PER-DEVICE causal chunk_start from the device's
-      mesh coordinate along that axis -> chunk_start = chunk_start_idx + rank*Sq (Sq = q's S/sp rows),
-      so q/index_q stay SP-sharded. None -> uniform chunk_start_idx (single-device / gathered query).
-      (Replaces the old host-built per-device chunk_offset tile; mesh-coord approach, #47939.)
-    block_cyclic_sp_axis / block_cyclic_chunk_local (set together): the AllGather'd K/V/index_k are
-      still in block-cyclic ("slab") SP order; the indexer (K reader) and sparse_sdpa_msa (K reader /
-      V writer) remap each natural block-id to its physical block IN-KERNEL (#49490/#48772), so the
-      caller no longer untilize->transpose->tilize them to natural order on the host. None -> the
-      tensors are already natural (single-chunk / pre-reordered).
+    cluster_axis: when set, the ops derive a PER-DEVICE causal chunk_start from the device's mesh
+      coordinate along that axis -> chunk_start = chunk_start_idx + rank*Sq (Sq = q's S/sp rows), so
+      q/index_q stay SP-sharded. None -> uniform chunk_start_idx (single-device / gathered query).
+    block_cyclic_sp_axis / block_cyclic_chunk_local (set together): the AllGather'd K/V/index_k stay in
+      block-cyclic ("slab") SP order; the indexer (K reader) and sparse_sdpa_msa (K reader / V writer)
+      remap each natural block-id to its physical block in-kernel, so nothing is reordered on the host.
+      None -> the tensors are already natural (single-chunk / pre-reordered).
     kv_len: when K/index_k are allocated at a FIXED worst-case T (the persistent high_bw_all_gather
       buffers, T = cache capacity) this is the valid natural-position prefix actually written (a multiple
       of block_size). The indexer scores/writes only columns [0, kv_len) (hash-excluded runtime arg, so a
@@ -296,16 +304,6 @@ def msa_indexer_sparse(
         # dense (ring_joint) output so the shared post-attention path works for MSA layers too.
         out = ttnn.to_layout(out, ttnn.TILE_LAYOUT)
     return (out, block_ids) if return_block_ids else out
-
-
-# Debug hook (default off): called with every MSA call's top-k block ids, e.g. to compare block selection
-# between two runs. Set with set_block_id_sink(fn) / set_block_id_sink(None).
-_block_id_sink = None
-
-
-def set_block_id_sink(fn):
-    global _block_id_sink
-    _block_id_sink = fn
 
 
 def msa_sp_attention_nocache(
@@ -361,8 +359,8 @@ def msa_sp_attention_nocache(
         v_full = gather("msa_nocache_v", v)
     with zone("ag_index_k"):
         index_k_full = gather("msa_nocache_index_k", index_k)
-    # Per-device causality via the merged op's native mesh-coord chunk_start (#47939): device r derives
-    # chunk_start = cached_len + r*Sq (Sq = q's s_local rows) from its coordinate along cluster_axis=sp_axis.
+    # Per-device causality from the mesh coordinate: device r derives chunk_start = cached_len + r*Sq (Sq = q's
+    # s_local rows) from its coordinate along cluster_axis=sp_axis.
     return msa_indexer_sparse(
         index_q,
         index_k_full,
@@ -506,51 +504,19 @@ def msa_sp_attention_cache_read(
     )
 
 
-def indexer_rows_used(sq, t, grid_x, grid_y):
-    """Grid rows indexer_score_msa lights up for Sq query rows against T keys (its banded schedule,
-    indexer_score_work_split.hpp, with INDEXER_Q_CHUNK / INDEXER_K_CHUNK): groups of q-chunks go to rows, bands
-    of k-chunks to columns, and idle rows are filled by replicating groups. Kept in step with the op."""
-    groups = max(1, sq // INDEXER_Q_CHUNK)
-    bands = -(-t // INDEXER_K_CHUNK)
-    group_rows = max(d for d in range(1, min(groups, grid_y) + 1) if groups % d == 0)
-    cols = min(bands, grid_x)
-    blocks = max(1, min(grid_y // group_rows, bands // cols))
-    return group_rows * blocks
-
-
-_overlap_refusal_logged = set()
-
-
-def msa_segments_overlap_possible(segments, kv_cache, ccl_manager):
-    """Whether the packed forward's warm segments can run the gather/compute overlap: at least two of them, an
-    SP axis to gather over, and an indexer schedule that stays inside the compute sub-device."""
-    warm = [s for s in segments if s.cached_len > 0]
-    if len(warm) < 2:
-        return False
-    device = ccl_manager.mesh_device
-    if device.shape[0] < 2:
-        return False
-    overlap = ccl_manager.get_msa_overlap()
-    sq = warm[0].q.shape[2]
-    rows = indexer_rows_used(sq, kv_cache.k.shape[2] * device.shape[0], *overlap.grid)
-    if rows > overlap.compute_rows:
-        key = (sq, rows)
-        if key not in _overlap_refusal_logged:
-            _overlap_refusal_logged.add(key)
-            logger.warning(
-                f"MSA segment overlap off: indexer_score_msa needs {rows} grid rows at Sq={sq}, the compute "
-                f"sub-device has {overlap.compute_rows}; the segments run serially"
-            )
-        return False
-    return True
+def msa_segments_overlap_possible(heads, mesh_config, ccl_manager):
+    """Whether the packed forward's warm segments (``heads``: their _PreAttn records) can run the gather/compute
+    overlap: at least two of them and an SP axis to gather over."""
+    return len(heads) >= 2 and ccl_manager.mesh_device.shape[mesh_config.sp_axis] >= 2
 
 
 def msa_segments_pipelined(
-    segments, *, kv_cache, layer_idx, mesh_config, ccl_manager, scale, block_size, topk_blocks, num_groups
+    heads, *, kv_cache, layer_idx, mesh_config, ccl_manager, scale, block_size, topk_blocks, num_groups
 ):
     """The warm segments' MSA chains with the next segment's cache gather overlapped under this segment's
-    block selection and sparse attention. ``segments``: objects with ``q`` (tiled), ``index_q``, the user
-    ``slot`` whose cache layer ``layer_idx`` is read, ``cached_len``, ``s_local``, in forward order. Returns the row-major attention outputs in that order.
+    block selection and sparse attention. ``heads``: the segments' prefill._PreAttn records (``q`` tiled,
+    ``index_q``, the user ``slot`` whose cache layer ``layer_idx`` is read, ``cached_len``, ``s_local``) in
+    forward order. Returns the row-major attention outputs in that order.
 
     Schedule, with G(i) = segment i's K/V/index_k gather (gather sub-device, buffer set i % 2) and C(i) = its
     indexer -> top-k -> sparse_sdpa_msa (compute sub-device):
@@ -558,7 +524,8 @@ def msa_segments_pipelined(
     The join is a device-side event over both sub-devices: C(i) then starts once its gather has landed and
     C(i-1) has released the other buffer set, while G(i+1) only waits for G(i) (a program stalls on its own
     sub-device's predecessors). Everything that is not one of those ops -- layout changes, allocations that
-    run as programs, deallocations of tensors in flight -- stays outside the window.
+    run as programs, deallocations of tensors in flight -- stays outside the window. Eager only: the event
+    record is rejected under trace capture.
     """
     overlap = ccl_manager.get_msa_overlap()
     mesh = ccl_manager.mesh_device
@@ -576,10 +543,10 @@ def msa_segments_pipelined(
                 (1, 1, seq_local * mesh.shape[sp_axis], cache_t.shape[3]),
                 cache_t.dtype,
             )
-    q_rm = [ttnn.to_layout(s.q, ttnn.ROW_MAJOR_LAYOUT) for s in segments]
+    q_rm = [ttnn.to_layout(s.q, ttnn.ROW_MAJOR_LAYOUT) for s in heads]
 
     def gather(i):
-        s = segments[i]
+        s = heads[i]
         with zone(f"gather{i}", FINE):
             return msa_cache_gather(
                 kv_cache,
@@ -596,51 +563,50 @@ def msa_segments_pipelined(
     outs = []
     keep_alive = []
     try:
-        mesh.load_sub_device_manager(overlap.manager_id)
-        overlap.loaded = True
-        pending = gather(0)
-        for i, s in enumerate(segments):
-            ttnn.record_event(mesh)
-            k_full, v_full, index_k_full, kv_len = pending
-            geometry = dict(
-                chunk_start_idx=s.cached_len,
-                cluster_axis=sp_axis,
-                block_cyclic_sp_axis=sp_axis,
-                block_cyclic_chunk_local=s.s_local,
-            )
-            with zone(f"seg{i}", FINE):
-                block_ids = msa_select_blocks(
-                    s.index_q,
-                    index_k_full,
-                    scale=scale,
-                    num_groups=num_groups,
-                    block_size=block_size,
-                    topk_blocks=topk_blocks,
-                    kv_len=kv_len,
-                    overlap=overlap,
-                    **geometry,
+        with overlap.window():
+            pending = gather(0)
+            for i, s in enumerate(heads):
+                # The join: the dispatcher records the event once both sub-devices' queued programs are done, so
+                # the next program (segment i's block selection) starts after G(i) and C(i-1). Nothing waits on
+                # the event itself.
+                ttnn.record_event(mesh, sub_device_ids=[overlap.compute_sd_id, overlap.gather_sd_id])
+                k_full, v_full, index_k_full, kv_len = pending
+                geometry = dict(
+                    chunk_start_idx=s.cached_len,
+                    cluster_axis=sp_axis,
+                    block_cyclic_sp_axis=sp_axis,
+                    block_cyclic_chunk_local=s.s_local,
                 )
-                with zone("sparse_sdpa"):
-                    outs.append(
-                        msa_sparse_attend(
-                            q_rm[i],
-                            k_full,
-                            v_full,
-                            block_ids,
-                            scale=scale,
-                            block_size=block_size,
-                            overlap=overlap,
-                            **geometry,
-                        )
+                with zone(f"seg{i}", FINE):
+                    block_ids = msa_select_blocks(
+                        s.index_q,
+                        index_k_full,
+                        scale=scale,
+                        num_groups=num_groups,
+                        block_size=block_size,
+                        topk_blocks=topk_blocks,
+                        kv_len=kv_len,
+                        overlap=overlap,
+                        **geometry,
                     )
-            keep_alive.append(block_ids)
-            if i + 1 < len(segments):
-                pending = gather(i + 1)
+                    with zone("sparse_sdpa"):
+                        outs.append(
+                            msa_sparse_attend(
+                                q_rm[i],
+                                k_full,
+                                v_full,
+                                block_ids,
+                                scale=scale,
+                                block_size=block_size,
+                                overlap=overlap,
+                                **geometry,
+                            )
+                        )
+                keep_alive.append(block_ids)
+                if i + 1 < len(heads):
+                    pending = gather(i + 1)
     finally:
-        # The join point: clearing the manager waits on both sub-devices before resetting.
-        if overlap.loaded:
-            mesh.clear_loaded_sub_device_manager()
-            overlap.loaded = False
+        # Leaving the window joined both sub-devices; only then may the in-flight inputs go.
         for t in keep_alive + q_rm:
             ttnn.deallocate(t)
     return outs
