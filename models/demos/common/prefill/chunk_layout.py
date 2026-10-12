@@ -56,3 +56,26 @@ def rotated_chunk_real_counts(chunk_start: int, actual_isl: int, sp: int, chunk_
     """
     end = chunk_start + actual_isl
     return [sum(p < end for p in row) for row in rotated_chunk_positions(chunk_start, sp, chunk_local)]
+
+
+def packed_segments_real_counts(n_reals: list[int], sp: int, s_local: int) -> list[int] | None:
+    """Per-chip count of leading real rows of a packed forward of segments holding ``n_reals`` real tokens
+    each, or None when every row is real.
+
+    Chip c's rows are the segments' c-th ``s_local``-row slices back to back. The MoE gate can skip pad rows
+    only when they all follow the chip's real rows, so a chip where a segment's pad precedes a later
+    segment's real rows counts every row as real (routed, still correct).
+    """
+    total = len(n_reals) * s_local
+    counts = []
+    for c in range(sp):
+        reals = [max(0, min(s_local, n - c * s_local)) for n in n_reals]
+        lead = 0
+        for k, r in enumerate(reals):
+            lead += r
+            if r < s_local:
+                if any(reals[k + 1 :]):
+                    lead = total
+                break
+        counts.append(lead)
+    return None if all(x == total for x in counts) else counts
