@@ -218,10 +218,7 @@ def test_msa_native_core_grid_bit_identical(device, enable_kv_block_cache):
 
 
 @run_for_blackhole()
-@pytest.mark.parametrize(
-    "bad",
-    ["two_ranges", "past_grid"],
-)
+@pytest.mark.parametrize("bad", ["two_ranges", "past_grid"], ids=["two_ranges", "past_grid"])
 def test_msa_native_core_grid_rejected(device, bad, expect_error):
     grid = device.compute_with_storage_grid_size()
     d, H, S, nblk = _D, 16, 8, 16
