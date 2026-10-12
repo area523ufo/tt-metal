@@ -98,8 +98,10 @@ class TtPrefillRuntimeConfig:
 class TtPrefillRuntime:
     """Single-rank prefill execution lifecycle: build model -> compile(kv_cache) ->
     prefill_chunk(chunk, kv_cache). Owns the SP=8 × TP=4 ``Model``; the KV cache is engine-owned and
-    passed into every call. ``prefill_segments`` is the packed variant (``segment_size`` set): several
-    users' segments in one forward; ``compile()`` does not warm its programs, its caller does."""
+    passed into every call. ``prefill_segments`` is the packed variant (``segment_size`` shorter than the
+    chunk): several users' segments in one forward, for single-rank studies only: ``compile()`` refuses such
+    a runtime, so no layer-completion sink can be registered through ``set_layer_completion_sink``, and its
+    caller warms its programs."""
 
     def __init__(self, mesh_device, hf_config, state_dict: dict, config: TtPrefillRuntimeConfig):
         self.mesh_device = mesh_device
@@ -110,6 +112,11 @@ class TtPrefillRuntime:
             config.max_seq_len % config.seg == 0
         ), f"max_seq_len ({config.max_seq_len}) must be a multiple of the segment size ({config.seg})"
         assert config.chunk_size % config.seg == 0, f"chunk_size {config.chunk_size} % segment {config.seg} != 0"
+        # A segment's per-chip slice is sliced out of the packed activations and written to the cache at tile
+        # granularity, so it must be whole tiles.
+        assert (
+            config.seg % (config.sp_factor * ttnn.TILE_SIZE) == 0
+        ), f"segment {config.seg} / sp {config.sp_factor} is not a multiple of {ttnn.TILE_SIZE} rows per chip"
         # The KV cache, its slot addressing and gather_layer are all sized by config.num_layers, while
         # the model builds one layer per entry of layer_indices. If those disagree, a layer addresses
         # past the per-user cache stride and silently corrupts another slot.
@@ -349,8 +356,8 @@ class TtPrefillRuntime:
         every KV-length bucket (the previous behaviour: max_seq_len / chunk_size chunks, 196 at 1M) re-ran
         the same programs and still missed variant (iii). What IS hashed is the cache capacity itself (gather
         buffer shapes, sparse_sdpa T), which is why reconfigure_capacity() invalidates this warm-up.
-        Each warm-up writes slot 0, which the real run overwrites. A packed runtime (``segment_size`` set) is
-        refused: its cache period is the segment, and ``prefill_segments``' caller warms its programs."""
+        Each warm-up writes slot 0, which the real run overwrites. A packed runtime (segment shorter than the
+        chunk) is refused: its cache period is the segment, and ``prefill_segments``' caller warms its programs."""
         assert self.model_built
         self._assert_unpacked("compile")
         chunk = self.config.chunk_size
@@ -511,17 +518,19 @@ class TtPrefillRuntime:
         return out  # logits [1,1,chunk_local,vocab_shard], SP-sharded on seq / TP-sharded on vocab
 
     def _assert_unpacked(self, what: str) -> None:
+        """Refuse a per-chunk entry point on a packed runtime (cache period shorter than the chunk)."""
         cfg = self.config
         assert cfg.segment_size in (None, cfg.chunk_size), (
             f"{what}() writes one {cfg.chunk_size}-token chunk, but this runtime's cache period is the "
-            f"{cfg.segment_size}-token segment (segment_size set): use prefill_segments()"
+            f"{cfg.segment_size}-token segment (segment_size < chunk_size): use prefill_segments()"
         )
 
     def prefill_segments(self, input_tensor: ttnn.Tensor, kv_cache, segments: list, request_id: int = 0):
         """Packed prefill: ONE forward over ``chunk_size // segment_size`` segments, each
-        ``(slot, cached_len, n_real)``. Norms, projections and MoE run once on the packed rows; RoPE, the KV
-        write, the SP gathers, indexer, top-k and SDPA run per segment against that segment's slot at its
-        cached_len. Returns what prefill_chunk returns (None on a last rank, the hidden state otherwise)."""
+        ``(slot, cached_len, n_real)``. The layer norms, the fused QKV projection and the MoE run once on the
+        packed rows; the head split, QK-norm, RoPE, the index branch (its projections included), the KV and
+        index_k writes, the SP gathers, indexer, top-k and SDPA run per segment against that segment's slot at
+        its cached_len. Returns what prefill_chunk returns (None on a last rank, the hidden state otherwise)."""
         cfg = self.config
         seg, sp = cfg.seg, cfg.sp_factor
         assert self.model_built, "build the model before prefill_segments()"
@@ -607,6 +616,7 @@ class TtPrefillRuntime:
         index_k) and passes them as ``stage_layouts`` so ONLY rank 0 builds the table spanning every
         stage; with stage_layouts None the table covers config.num_layers == the full model from this
         rank's own mesh."""
+        self._assert_unpacked("build_kv_chunk_table")  # the table's slab period is the chunk
         from models.demos.minimax_m3.tt.runners.kv_chunk_table import build_and_serialize_kv_chunk_table
 
         c = self.config
@@ -710,6 +720,7 @@ class TtPrefillRuntime:
         validation module so the PCC logic lives in one place. ``real_len`` caps the compared extent to the
         real (non-pad) tokens; ``pt_path_override`` (per-slot .pt golden) is unsupported for M3 (trace-dir
         goldens only) and rejected if set."""
+        self._assert_unpacked("kv_cache_pcc_check")  # the validation un-rotates with the chunk as the period
         if pt_path_override is not None:
             raise NotImplementedError(
                 "MiniMax-M3 kv_cache_pcc_check has no per-slot .pt golden path; use PREFILL_TRACE_DIR"

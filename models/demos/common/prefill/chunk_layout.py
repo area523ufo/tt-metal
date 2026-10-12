@@ -6,7 +6,8 @@
 The update_padded_kv_cache writer gives SP chip c the chunk_local-token blocks c, c+sp, ... of the global sequence,
 so a chunk that starts mid-slab (a multi-turn resume at a tile boundary) is not a contiguous split of its tokens:
 the first-rank input must be rotated to match (as the engine's H2D prefill connector does), and per-chip counts of
-real rows follow the same placement.
+real rows follow the same placement. A packed forward (several segment-aligned segments in one chunk) is the
+un-rotated case repeated per segment; ``packed_segments_real_counts`` gives its per-chip real-row counts.
 """
 
 
@@ -60,7 +61,8 @@ def rotated_chunk_real_counts(chunk_start: int, actual_isl: int, sp: int, chunk_
 
 def packed_segments_real_counts(n_reals: list[int], sp: int, s_local: int) -> list[int] | None:
     """Per-chip count of leading real rows of a packed forward of segments holding ``n_reals`` real tokens
-    each, or None when every row is real.
+    each, or None when no chip can skip a row (every row real, or pad rows only ahead of a later segment's
+    real rows).
 
     Chip c's rows are the segments' c-th ``s_local``-row slices back to back. The MoE gate can skip pad rows
     only when they all follow the chip's real rows, so a chip where a segment's pad precedes a later
