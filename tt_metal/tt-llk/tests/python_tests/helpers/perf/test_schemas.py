@@ -20,6 +20,7 @@ PERF_TEST_SCHEMAS = {
         "columns": [
             "broadcast_type",
             "dest_acc",
+            "dest_sync",
             "formats.input_A",
             "formats.input_B",
             "formats.output",
