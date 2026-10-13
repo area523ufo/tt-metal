@@ -213,19 +213,31 @@ bool nodes_intersect(const Nodes& a, const Nodes& b) {
     return a_set.intersects(b_set);
 }
 
-// Role of a kernel binding a PrefetcherPipe accessor group, from its nodes and the group's receiver
-// sets alone (the spec does not name senders; a pipe's sender is the pipe object's). The kernel is
-// the group's receiver when its nodes include the whole union of the receiver sets, and its sender
-// when its nodes avoid every receiver and number at least one per pipe (which node hosts which pipe
-// is settled when the pipes are supplied). Its other nodes are extra nodes, which take no part in
-// the pipes. ValidateProgramSpec and ReservePrefetcherPipeSlots both derive the role through these
-// two definitions.
-bool is_prefetcher_pipe_receiver_role(const NodeRangeSet& kernel_nodes, const NodeRangeSet& group_receivers) {
-    return kernel_nodes.contains(group_receivers);
+// Set equality that is independent of how the two sets decompose into ranges (NodeRangeSet's
+// operator== compares the range lists, so equal sets with different range splits compare unequal).
+bool same_node_set(const NodeRangeSet& a, const NodeRangeSet& b) {
+    return a.num_cores() == b.num_cores() && a.intersection(b).num_cores() == a.num_cores();
+}
+
+// The nodes of a kernel binding a PrefetcherPipe accessor group that its role is derived from: all
+// of them but the binding's extra nodes, which take no part in the group's pipes.
+NodeRangeSet prefetcher_pipe_role_nodes(
+    const NodeRangeSet& kernel_nodes, const KernelAdvancedOptions::PrefetcherPipeBinding& binding) {
+    return kernel_nodes.subtract(binding.extra_nodes);
+}
+
+// Role of a kernel binding a PrefetcherPipe accessor group, from its role nodes and the group's
+// receiver sets alone (the spec does not name senders; a pipe's sender is the pipe object's). The
+// kernel is the group's receiver when its role nodes are exactly the union of the receiver sets, and
+// its sender when they avoid every receiver and number one per pipe (which node hosts which pipe is
+// settled when the pipes are supplied). ValidateProgramSpec and ReservePrefetcherPipeSlots both
+// derive the role through these two definitions.
+bool is_prefetcher_pipe_receiver_role(const NodeRangeSet& role_nodes, const NodeRangeSet& group_receivers) {
+    return same_node_set(role_nodes, group_receivers);
 }
 bool is_prefetcher_pipe_sender_role(
-    const NodeRangeSet& kernel_nodes, const NodeRangeSet& group_receivers, size_t num_pipes) {
-    return !kernel_nodes.intersects(group_receivers) && kernel_nodes.num_cores() >= num_pipes;
+    const NodeRangeSet& role_nodes, const NodeRangeSet& group_receivers, size_t num_pipes) {
+    return !role_nodes.intersects(group_receivers) && role_nodes.num_cores() == num_pipes;
 }
 
 // Helper: return a DFB's alias-with list.
@@ -901,12 +913,12 @@ bool DmKernelDisablesImplicitSync(const DataMovementHardwareConfig& dm_config, c
 // slot on every node the kernel runs on, so one binary serves them all):
 //  2. The binding kernel is a data-movement kernel (compute reaches the ring via a relay DFB).
 //  3. Tiling: the group's pipes agree on ring_size / entry_size and their receiver sets are
-//     pairwise disjoint. The kernel's nodes include EITHER the whole union of the receiver sets
-//     (receiver role) OR avoid every receiver and number at least one per pipe (sender role); its
-//     other nodes are extra nodes. Covering only part of the receivers is rejected. Per pipe, at
-//     most one kernel plays sender and at most one plays receiver, so exactly one kernel instance
-//     owns the credit counters on each node. Roles may be split across Programs (sender op vs
-//     consumer op).
+//     pairwise disjoint. The binding's extra nodes are nodes of the kernel and none of the
+//     receivers. The kernel's other nodes equal EITHER the union of the receiver sets (receiver
+//     role) OR avoid every receiver and number one per pipe (sender role); mixed or partial
+//     coverage is rejected. Per pipe, at most one kernel plays sender and at most one plays
+//     receiver, so exactly one kernel instance owns the credit counters on each node. Roles may be
+//     split across Programs (sender op vs consumer op).
 //  4. Receiver-side credit lanes P: the receiver kernel's num_threads (and, with a relay, the
 //     relay's PRODUCER kernels' num_threads) must agree, fit the architecture's lane capacity,
 //     and, when P > 1, divide the ring's entry count.
@@ -998,27 +1010,47 @@ void ValidatePrefetcherPipeSpec(const ProgramSpec& spec, const CollectedSpecData
                 group_receivers = group_receivers.merge(receivers);
             }
 
-            // Role: the kernel's nodes include all of the group's receivers, or at least one node per
-            // pipe and none of the receivers.
+            TT_FATAL(
+                nodes.contains(binding.extra_nodes),
+                "Kernel '{}' accessor '{}' lists extra_nodes {}, but its WorkUnitSpecs place it on {}. Extra nodes "
+                "are nodes the kernel runs on.",
+                kernel.unique_id,
+                binding.accessor_name,
+                binding.extra_nodes.str(),
+                nodes.str());
+            TT_FATAL(
+                !binding.extra_nodes.intersects(group_receivers),
+                "Kernel '{}' accessor '{}' lists extra_nodes {} that include receiver nodes of its pipes ({}). An "
+                "extra node takes no part in the group's pipes.",
+                kernel.unique_id,
+                binding.accessor_name,
+                binding.extra_nodes.str(),
+                group_receivers.str());
+
+            // Role: the kernel's nodes other than its extra nodes are exactly the group's receivers, or
+            // one sender node per pipe, none of them a receiver.
             const size_t num_pipes = binding.pipe_parameter_names.size();
-            const bool is_receiver_role = is_prefetcher_pipe_receiver_role(nodes, group_receivers);
+            const NodeRangeSet role_nodes = prefetcher_pipe_role_nodes(nodes, binding);
+            const bool is_receiver_role = is_prefetcher_pipe_receiver_role(role_nodes, group_receivers);
             const bool is_sender_role =
-                !is_receiver_role && is_prefetcher_pipe_sender_role(nodes, group_receivers, num_pipes);
+                !is_receiver_role && is_prefetcher_pipe_sender_role(role_nodes, group_receivers, num_pipes);
             if (!is_sender_role && !is_receiver_role) {
-                const uint32_t on_receivers = nodes.intersection(group_receivers).num_cores();
+                const uint32_t on_receivers = role_nodes.intersection(group_receivers).num_cores();
                 TT_THROW(
-                    "Kernel '{}' accessor '{}' ({} pipe(s)): the kernel's WorkUnitSpec nodes must include either all "
-                    "of the group's receiver nodes (receiver role) or none of them and at least {} node(s), one per "
-                    "pipe (sender role). Kernel covers {} node(s): {} of the {} receiver node(s), {} outside the "
-                    "receivers. A role cannot cover only part of the receivers.",
+                    "Kernel '{}' accessor '{}' ({} pipe(s)): the kernel's WorkUnitSpec nodes other than its "
+                    "extra_nodes must equal either the union of the group's receiver nodes (receiver role) or be {} "
+                    "node(s) outside them, one per pipe (sender role). Kernel covers {} node(s) besides {} extra "
+                    "node(s): {} of the {} receiver node(s), {} outside the receivers. A role cannot be partial or "
+                    "mixed with the other role; list nodes that take no part in the group's pipes in extra_nodes.",
                     kernel.unique_id,
                     binding.accessor_name,
                     num_pipes,
                     num_pipes,
-                    nodes.num_cores(),
+                    role_nodes.num_cores(),
+                    binding.extra_nodes.num_cores(),
                     on_receivers,
                     group_receivers.num_cores(),
-                    nodes.num_cores() - on_receivers);
+                    role_nodes.num_cores() - on_receivers);
             }
 
             auto& role_map = is_sender_role ? sender_kernel_of : receiver_kernel_of;
@@ -3549,17 +3581,17 @@ namespace {
 // ----------------------------------------------------------------------------
 //
 // One Program slot per accessor group (a KernelAdvancedOptions::PrefetcherPipeBinding), reserved on the
-// kernel's nodes from spec geometry alone. The group's role (sender / receiver; validated by
-// ValidateProgramSpec) decides the slot's receiver cores (the group's receivers, never its extra
-// nodes) and credit lanes P (the receiver kernel's num_threads). A relay DFB whose
-// prefetcher_pipe_relays equals the group's pipe set is registered against the slot (its base
-// address is supplied when the pipe binds).
+// kernel's nodes from spec geometry alone. The group's role (sender / receiver; validated exact
+// by ValidateProgramSpec on the nodes other than the binding's extra nodes) decides the slot's
+// receiver cores and credit lanes P (the receiver kernel's num_threads); the extra nodes are the
+// slot's extra cores. A relay DFB whose prefetcher_pipe_relays equals the group's pipe set is
+// registered against the slot (its base address is supplied when the pipe binds).
 //
 // Every parameter named by the group is recorded with the slot and the cores it owns inside the
-// kernel's nodes (its sender node or its receivers -- one pipe per node). SetProgramRunArgs later
-// binds the supplied pipe object onto exactly those cores, so a multi-pipe accessor resolves per
-// node on the host and the kernel binary sees one slot; the kernel's other nodes (extra nodes) then
-// get the record of one of the group's pipes.
+// kernel's nodes (its sender node or its receivers -- the group tiles the nodes other than the
+// extra nodes, so this is one pipe per node). SetProgramRunArgs later binds the supplied pipe object
+// onto exactly those cores, so a multi-pipe accessor resolves per node on the host and the kernel
+// binary sees one slot. The group's first pipe also owns the extra cores, which take its record.
 using PrefetcherPipeHandlesByKernel =
     std::unordered_map<const KernelSpec*, std::vector<tt::tt_metal::PrefetcherPipeBindingHandle>>;
 
@@ -3618,14 +3650,15 @@ PrefetcherPipeHandlesByKernel ReservePrefetcherPipeSlots(
                 const PrefetcherPipeParameter* pipe = collected.prefetcher_pipe_by_name.at(pipe_name);
                 group_receivers = group_receivers.merge(to_node_range_set(pipe->receivers));
             }
+            const NodeRangeSet role_nodes = prefetcher_pipe_role_nodes(nodes, binding);
             const bool is_sender_role =
-                !is_prefetcher_pipe_receiver_role(nodes, group_receivers) &&
-                is_prefetcher_pipe_sender_role(nodes, group_receivers, binding.pipe_parameter_names.size());
+                !is_prefetcher_pipe_receiver_role(role_nodes, group_receivers) &&
+                is_prefetcher_pipe_sender_role(role_nodes, group_receivers, binding.pipe_parameter_names.size());
 
             const NodeRangeSet receiver_cores = is_sender_role ? NodeRangeSet() : group_receivers;
             const uint32_t num_credit_lanes = is_sender_role ? 1u : kernel.num_threads;
             const uint8_t prefetcher_pipe_id = program_impl.reserve_prefetcher_pipe_slot(
-                nodes, receiver_cores, first->ring_size, first->entry_size, num_credit_lanes);
+                nodes, receiver_cores, binding.extra_nodes, first->ring_size, first->entry_size, num_credit_lanes);
             handles[&kernel].push_back(
                 {.accessor_name = binding.accessor_name, .prefetcher_pipe_id = prefetcher_pipe_id});
 
@@ -3635,7 +3668,8 @@ PrefetcherPipeHandlesByKernel ReservePrefetcherPipeSlots(
                 const PrefetcherPipeParameter* pipe = collected.prefetcher_pipe_by_name.at(pipe_name);
                 placements.at(pipe_name).slots.push_back(
                     {.prefetcher_pipe_id = prefetcher_pipe_id,
-                     .cores = is_sender_role ? nodes : to_node_range_set(pipe->receivers),
+                     .cores = is_sender_role ? role_nodes : to_node_range_set(pipe->receivers),
+                     .extra_cores = pipe_name == binding.pipe_parameter_names[0] ? binding.extra_nodes : NodeRangeSet(),
                      .sender_role = is_sender_role});
             }
 
