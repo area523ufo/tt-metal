@@ -724,12 +724,14 @@ void kernel_main() {
     {
         DataflowBuffer dfb_eps_obj(dfb_eps);
         dfb_eps_obj.wait_front(1);
+        dummy_unpack(dfb_eps);
         dfb_eps_obj.pop_front(1);
     }
 #ifdef OUT_SELF_LOOP
     // Without a write-back the output buffer has no reader: this kernel is its only producer and consumer.
     // Pop what it pushed so the buffer is left balanced.
     dfb_out.wait_front(num_tiles_per_block);
+    dummy_unpack(dfb_out_id);
     dfb_out.pop_front(num_tiles_per_block);
 #endif
 
