@@ -71,6 +71,37 @@ inline void load_and_clear_high_bits(
     }
 }
 
+// Several tiles per call run at tile 0's constant addresses and step the dest counter a tile at a time: a load or store
+// address computed at run time costs the issuing RISC two or three instructions, which left the SFPU waiting.
+constexpr std::uint32_t TILE_STEP_ADDR_MOD = ADDR_MOD_6;
+
+template <std::int16_t DEST_INCR = ROWS_PER_TILE>
+inline void set_tile_step_addrmod() {
+    addr_mod_t{
+        .srca = {.incr = 0},
+        .srcb = {.incr = 0},
+        .dest = {.incr = DEST_INCR},
+    }
+        .set(TILE_STEP_ADDR_MOD);
+}
+
+// The tile steps leave the counter's CR copy alone, so return_to_dest_base goes back to the counter mark_dest_base saw.
+inline void mark_dest_base() {
+    TTI_SETRWC(p_setrwc::CLR_NONE, p_setrwc::C_TO_CR_MODE, 0, 0, 0, p_setrwc::SET_D);
+}
+
+inline void return_to_dest_base() {
+    TTI_SETRWC(p_setrwc::CLR_NONE, p_setrwc::CR_D, 0, 0, 0, p_setrwc::SET_D);
+}
+
+// ADDR_MOD_6's dest step alone, for the float MAX/MIN rows: their init leaves its SrcA, SrcB and bias steps at zero, and
+// the column window needs it back at a face.
+template <std::int16_t DEST_INCR>
+inline void set_tile_step_dest_incr() {
+    TTI_SETC16(
+        addr_mod_t::addr_mod_dest_reg_addr[TILE_STEP_ADDR_MOD], addr_mod_t::addr_mod_dest_t{.incr = DEST_INCR}.val());
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -578,7 +609,8 @@ inline void horizontal_reduce_merged() {
  * @param tile_row_offset Base row offset for this tile in the dest register
  */
 template <InstrModLoadStore INSTRUCTION_MODE, bool clear_high_bits>
-inline void perform_reduce_row_max_tile(std::uint32_t tile_row_offset, std::uint32_t result_store_mode) {
+inline void perform_reduce_row_max_tile(
+    std::uint32_t tile_row_offset, std::uint32_t result_store_mode, std::uint32_t last_store_addr_mod = ADDR_MOD_7) {
     // The fused path cannot mask the high bits of a UInt16 operand between its load and its compare.
 #ifdef DISABLE_SFPLOADMACRO
     constexpr bool fused_vertical_swap = false;
@@ -699,7 +731,7 @@ inline void perform_reduce_row_max_tile(std::uint32_t tile_row_offset, std::uint
 
     if constexpr (fused_vertical_swap) {
         TT_SFPSTORE(p_sfpu::LREG7, result_store_mode, ADDR_MOD_7, previous_first);
-        TT_SFPSTORE(p_sfpu::LREG4, result_store_mode, ADDR_MOD_7, previous_second);
+        TT_SFPSTORE(p_sfpu::LREG4, result_store_mode, last_store_addr_mod, previous_second);
     }
 }
 
@@ -795,8 +827,10 @@ inline void perform_reduce_row_max_int32_tile(
  * @param block_ct_dim Number of tiles along x axis of tensor (column tiles)
  */
 template <InstrModLoadStore INSTRUCTION_MODE, bool clear_high_bits, bool pack_low16>
-inline void max_first_columns_across_tiles(std::uint32_t tile_row_base, std::uint32_t block_ct_dim) {
+inline void max_first_columns_across_tiles(
+    std::uint32_t tile_row_base, std::uint32_t block_ct_dim, bool tile_stepped = false) {
     constexpr std::uint32_t RESULT_ROWS[8] = {0, 4, 8, 12, 32, 36, 40, 44};
+    const std::uint32_t LAST_LOAD_ADDR_MOD = tile_stepped ? TILE_STEP_ADDR_MOD : ADDR_MOD_7;
 
     for (std::uint32_t batch = 0; batch < 2; batch++) {
         std::uint32_t base_idx = batch * 4;
@@ -808,10 +842,10 @@ inline void max_first_columns_across_tiles(std::uint32_t tile_row_base, std::uin
         load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 2]);
         load_and_clear_high_bits<clear_high_bits>(
-            p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 3]);
+            p_sfpu::LREG3, INSTRUCTION_MODE, LAST_LOAD_ADDR_MOD, tile_row_base + RESULT_ROWS[base_idx + 3]);
 
         for (std::uint32_t t = 1; t < block_ct_dim; t++) {
-            std::uint32_t tile_offset = tile_row_base + t * ROWS_PER_TILE;
+            std::uint32_t tile_offset = tile_stepped ? tile_row_base : tile_row_base + t * ROWS_PER_TILE;
 
             load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 0]);
@@ -820,12 +854,15 @@ inline void max_first_columns_across_tiles(std::uint32_t tile_row_base, std::uin
             load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 2]);
             load_and_clear_high_bits<clear_high_bits>(
-                p_sfpu::LREG7, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 3]);
+                p_sfpu::LREG7, INSTRUCTION_MODE, LAST_LOAD_ADDR_MOD, tile_offset + RESULT_ROWS[base_idx + 3]);
 
             TTI_SFPSWAP(0, p_sfpu::LREG0, p_sfpu::LREG4, 1);
             TTI_SFPSWAP(0, p_sfpu::LREG1, p_sfpu::LREG5, 1);
             TTI_SFPSWAP(0, p_sfpu::LREG2, p_sfpu::LREG6, 1);
             TTI_SFPSWAP(0, p_sfpu::LREG3, p_sfpu::LREG7, 1);
+        }
+        if (tile_stepped) {
+            return_to_dest_base();
         }
 
         // Final, packer-visible store: use mode 9 (SFPSTORE_MOD0_FMT_LO16) only when the OUTPUT is
@@ -987,6 +1024,18 @@ inline void perform_reduce_row_max_min(std::uint32_t block_ct_dim, std::uint32_t
                                               ? 9u /* SFPSTORE_MOD0_FMT_LO16 */
                                               : static_cast<std::uint32_t>(INSTRUCTION_MODE);
 
+#ifndef DISABLE_SFPLOADMACRO
+    // One row of several tiles runs every tile at tile 0's addresses and steps the dest counter a tile from each tile's
+    // last store; the column window's ADDR_MOD_6 is put back after.
+    const bool tile_stepped = !is_int32 && block_rt_dim == 1 && block_ct_dim > 1;
+#else
+    constexpr bool tile_stepped = false;
+#endif
+    if (tile_stepped) {
+        set_tile_step_dest_incr<ROWS_PER_TILE>();
+        mark_dest_base();
+    }
+
     for (std::uint32_t i = 0; i < block_rt_dim; i++) {
         std::uint32_t tile_row_offset = ROWS_PER_TILE * block_ct_dim * i;
 
@@ -997,7 +1046,8 @@ inline void perform_reduce_row_max_min(std::uint32_t block_ct_dim, std::uint32_t
                 // be cast back to two's-complement; otherwise it is an intermediate kept in sign-magnitude.
                 perform_reduce_row_max_int32_tile(tile_offset, tile_store_mode, /*final_store=*/block_ct_dim == 1);
             } else {
-                perform_reduce_row_max_tile<INSTRUCTION_MODE, clear_high_bits>(tile_offset, tile_store_mode);
+                perform_reduce_row_max_tile<INSTRUCTION_MODE, clear_high_bits>(
+                    tile_stepped ? 0 : tile_offset, tile_store_mode, tile_stepped ? TILE_STEP_ADDR_MOD : ADDR_MOD_7);
             }
         }
 
@@ -1005,8 +1055,14 @@ inline void perform_reduce_row_max_min(std::uint32_t block_ct_dim, std::uint32_t
             if constexpr (is_int32) {
                 max_first_columns_across_tiles_int32<clear_high_bits, pack_low16>(tile_row_offset, block_ct_dim);
             } else {
+                if (tile_stepped) {
+                    return_to_dest_base();
+                }
                 max_first_columns_across_tiles<INSTRUCTION_MODE, clear_high_bits, pack_low16>(
-                    tile_row_offset, block_ct_dim);
+                    tile_row_offset, block_ct_dim, tile_stepped);
+                if (tile_stepped) {
+                    set_tile_step_dest_incr<ROWS_PER_FACE>();
+                }
             }
         }
     }
@@ -1047,7 +1103,8 @@ inline void perform_reduce_row_sum_tile(
     std::uint32_t tile_row_offset,
     std::uint32_t result_store_mode,
     bool divide_now = false,
-    RowAvgReciprocal recip = {}) {
+    RowAvgReciprocal recip = {},
+    std::uint32_t last_store_addr_mod = ADDR_MOD_7) {
     // Determine if integer or float mode at compile time
     constexpr bool is_integer_mode =
         (INSTRUCTION_MODE == InstrModLoadStore::INT32 || INSTRUCTION_MODE == InstrModLoadStore::LO16);
@@ -1135,9 +1192,33 @@ inline void perform_reduce_row_sum_tile(
             TT_SFPSTORE(
                 p_sfpu::LREG0, result_store_mode, ADDR_MOD_7, tile_row_offset + face_pair_base + row_offset_first);
             TT_SFPSTORE(
-                p_sfpu::LREG4, result_store_mode, ADDR_MOD_7, tile_row_offset + face_pair_base + row_offset_second);
+                p_sfpu::LREG4,
+                result_store_mode,
+                (face_pair == 1 && row_group == 1) ? last_store_addr_mod : ADDR_MOD_7,
+                tile_row_offset + face_pair_base + row_offset_second);
         }
     }
+}
+
+// The load-macro path of perform_reduce_row_sum_tile for one 8-row group at constant addresses: the rows of several
+// float tiles run every tile at tile 0's addresses, so every load and store is an immediate.
+template <InstrModLoadStore INSTRUCTION_MODE, std::uint32_t GROUP_A, std::uint32_t LAST_STORE_ADDR_MOD = ADDR_MOD_7>
+inline void row_sum_group_at_dest() {
+    constexpr std::uint32_t GROUP_B = GROUP_A + ROWS_PER_LOAD;
+    TTI_SFPLOAD(p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_A + ROWS_PER_FACE + 2);
+    TTI_SFPLOADMACRO((0 << 2) | p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_A + ROWS_PER_FACE);
+    TTI_SFPLOAD(p_sfpu::LREG7, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_B + ROWS_PER_FACE + 2);
+    TTI_SFPLOAD(p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_B + ROWS_PER_FACE);
+    half_reduce_add<false, p_sfpu::LREG6, p_sfpu::LREG7>();
+    TTI_SFPLOADMACRO((1 << 2) | p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_A + 2);
+    TTI_SFPLOAD(p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_B + 2);
+    half_reduce_add<false, p_sfpu::LREG5, p_sfpu::LREG6>();
+    TTI_SFPLOADMACRO((2 << 2) | p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_A);
+    TTI_SFPLOAD(p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_B);
+    half_reduce_add<false, p_sfpu::LREG4, p_sfpu::LREG5>();
+    horizontal_reduce<false>();
+    TTI_SFPSTORE(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, GROUP_A);
+    TTI_SFPSTORE(p_sfpu::LREG4, INSTRUCTION_MODE, LAST_STORE_ADDR_MOD, GROUP_B);
 }
 
 /**
@@ -1161,9 +1242,11 @@ inline void perform_reduce_row_sum_tile(
  */
 template <InstrModLoadStore INSTRUCTION_MODE, bool clear_high_bits, bool pack_low16, bool is_avg = false>
 inline void sum_first_columns_across_tiles(
-    std::uint32_t tile_row_base, std::uint32_t block_ct_dim, RowAvgReciprocal recip = {}) {
+    std::uint32_t tile_row_base, std::uint32_t block_ct_dim, RowAvgReciprocal recip = {}, bool tile_stepped = false) {
     constexpr bool is_integer_mode =
         (INSTRUCTION_MODE == InstrModLoadStore::INT32 || INSTRUCTION_MODE == InstrModLoadStore::LO16);
+    // tile_stepped: the dest counter starts at tile 0 and each tile's last load steps it to the next tile.
+    const std::uint32_t LAST_LOAD_ADDR_MOD = tile_stepped ? TILE_STEP_ADDR_MOD : ADDR_MOD_7;
 
     // Row offset for each of the 8 partial row-sum results (face 0: 0,4,8,12; face 2: 32,36,40,44)
     constexpr std::uint32_t RESULT_ROWS[8] = {0, 4, 8, 12, 32, 36, 40, 44};
@@ -1179,11 +1262,11 @@ inline void sum_first_columns_across_tiles(
         load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 2]);
         load_and_clear_high_bits<clear_high_bits>(
-            p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 3]);
+            p_sfpu::LREG3, INSTRUCTION_MODE, LAST_LOAD_ADDR_MOD, tile_row_base + RESULT_ROWS[base_idx + 3]);
 
         // Accumulate from remaining tiles
         for (std::uint32_t t = 1; t < block_ct_dim; t++) {
-            std::uint32_t tile_offset = tile_row_base + t * ROWS_PER_TILE;
+            std::uint32_t tile_offset = tile_stepped ? tile_row_base : tile_row_base + t * ROWS_PER_TILE;
 
             // Load tile t's four LREGs at the same offsets into LREG4-7
             load_and_clear_high_bits<clear_high_bits>(
@@ -1193,7 +1276,7 @@ inline void sum_first_columns_across_tiles(
             load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 2]);
             load_and_clear_high_bits<clear_high_bits>(
-                p_sfpu::LREG7, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 3]);
+                p_sfpu::LREG7, INSTRUCTION_MODE, LAST_LOAD_ADDR_MOD, tile_offset + RESULT_ROWS[base_idx + 3]);
 
             // Add LREG4-7 into LREG0-3
             if constexpr (is_integer_mode) {
@@ -1207,6 +1290,9 @@ inline void sum_first_columns_across_tiles(
                 TTI_SFPADD(p_sfpu::LREG2, p_sfpu::LCONST_1, p_sfpu::LREG6, p_sfpu::LREG2, 0);
                 TTI_SFPADD(p_sfpu::LREG3, p_sfpu::LCONST_1, p_sfpu::LREG7, p_sfpu::LREG3, 0);
             }
+        }
+        if (tile_stepped) {
+            return_to_dest_base();
         }
 
         // LREG0-3 now hold the full per-row sum across all column tiles. For AVG (float-only path)
@@ -1270,9 +1356,13 @@ inline void perform_reduce_row_sum_avg(std::uint32_t block_ct_dim, std::uint32_t
     const bool divide_in_tile = is_avg && (block_ct_dim == 1);
 
 #ifndef DISABLE_SFPLOADMACRO
-    // Float formats, one tile per call: the load macros need constant load addresses for the issuing RISC to keep ahead
-    // of the SFPU, and the several-tile loop computes its addresses at run time.
-    if constexpr (INSTRUCTION_MODE == InstrModLoadStore::FP32 || INSTRUCTION_MODE == InstrModLoadStore::FP16B) {
+    constexpr bool use_load_macros =
+        INSTRUCTION_MODE == InstrModLoadStore::FP32 || INSTRUCTION_MODE == InstrModLoadStore::FP16B;
+#else
+    constexpr bool use_load_macros = false;
+#endif
+    const bool tile_stepped = block_rt_dim == 1 && block_ct_dim > 1;
+    if constexpr (use_load_macros) {
         if (block_ct_dim == 1 && block_rt_dim == 1) {
             init_row_sum_load_macros();
             perform_reduce_row_sum_tile<INSTRUCTION_MODE, clear_high_bits, is_avg, true>(
@@ -1280,7 +1370,14 @@ inline void perform_reduce_row_sum_avg(std::uint32_t block_ct_dim, std::uint32_t
             return;
         }
     }
-#endif
+
+    if (tile_stepped) {
+        set_tile_step_addrmod();
+        mark_dest_base();
+    }
+    if constexpr (use_load_macros) {
+        init_row_sum_load_macros();
+    }
 
     for (std::uint32_t i = 0; i < block_rt_dim; i++) {
         std::uint32_t tile_row_offset = ROWS_PER_TILE * block_ct_dim * i;
@@ -1288,14 +1385,30 @@ inline void perform_reduce_row_sum_avg(std::uint32_t block_ct_dim, std::uint32_t
         // Step 1: Reduce each tile individually (horizontal reduction within each tile)
         for (std::uint32_t j = 0; j < block_ct_dim; j++) {
             std::uint32_t tile_offset = tile_row_offset + (ROWS_PER_TILE * j);
-            perform_reduce_row_sum_tile<INSTRUCTION_MODE, clear_high_bits, is_avg>(
-                tile_offset, tile_store_mode, divide_in_tile, recip);
+            if constexpr (use_load_macros) {
+                if (tile_stepped) {
+                    row_sum_group_at_dest<INSTRUCTION_MODE, 0>();
+                    row_sum_group_at_dest<INSTRUCTION_MODE, 8>();
+                    row_sum_group_at_dest<INSTRUCTION_MODE, 2 * ROWS_PER_FACE>();
+                    row_sum_group_at_dest<INSTRUCTION_MODE, 2 * ROWS_PER_FACE + 8, TILE_STEP_ADDR_MOD>();
+                    continue;
+                }
+            }
+            perform_reduce_row_sum_tile<INSTRUCTION_MODE, clear_high_bits, is_avg, use_load_macros>(
+                tile_stepped ? 0 : tile_offset,
+                tile_store_mode,
+                divide_in_tile,
+                recip,
+                tile_stepped ? TILE_STEP_ADDR_MOD : ADDR_MOD_7);
         }
 
         // Step 2: Sum column 0 from all tiles in this row into tile 0's column 0
         if (block_ct_dim > 1) {
+            if (tile_stepped) {
+                return_to_dest_base();
+            }
             sum_first_columns_across_tiles<INSTRUCTION_MODE, clear_high_bits, pack_low16, is_avg>(
-                tile_row_offset, block_ct_dim, recip);
+                tile_row_offset, block_ct_dim, recip, tile_stepped);
         }
     }
 }
@@ -1970,23 +2083,43 @@ inline void init_reduce_max_min_int32_signed() {
     TTI_SFPSWAP(0, p_sfpu::LREG5, p_sfpu::LREG4, 1);
 }
 
+constexpr std::uint32_t FLIP_VECTORS_PER_TILE = ROWS_PER_TILE / COL_REDUCE_ODD_COLUMNS;
+constexpr std::uint32_t FLIP_CHUNK = 4;
+constexpr std::uint32_t FLIP_REPLAY_START = INT32_COL_REPLAY_LEN + 1;  // past the Int32 column window
+
+template <std::uint32_t ADDR, std::uint32_t STORE_ADDR_MOD = ADDR_MOD_7>
+inline void flip_sign_bit_vector() {
+    TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, ADDR);
+    TTI_SFPXOR(0 /*imm12_math*/, p_sfpu::LREG7, p_sfpu::LREG0, 0 /*instr_mod1*/);
+    TTI_SFPSTORE(p_sfpu::LREG0, InstrModLoadStore::INT32, STORE_ADDR_MOD, ADDR);
+}
+
+template <std::uint32_t... VECTOR>
+inline void flip_sign_bit_vectors(std::integer_sequence<std::uint32_t, VECTOR...>) {
+    (flip_sign_bit_vector<VECTOR * COL_REDUCE_ODD_COLUMNS>(), ...);
+}
+
 /**
  * @brief XOR bit 31 of every datum in the first @p num_tiles 32x32 tiles at the current DEST base. This maps
  *        UInt32 order onto two's-complement order and back, so UInt32 MAX/MIN can run on the signed Int32
- *        path. Uses LREG0 and LREG7.
+ *        path. Uses LREG0 and LREG7; with several tiles, also replay slots [16, 28) and a chunk step in ADDR_MOD_6.
  */
 inline void flip_sign_bits(const std::uint32_t num_tiles) {
     TTI_SFPLOADI(p_sfpu::LREG7, sfpi::SFPLOADI_MOD0_FLOATB, 0x8000);  // 0x80000000
-    for (std::uint32_t tile = 0; tile < num_tiles; tile++) {
-        for (std::uint32_t row = 0; row < ROWS_PER_TILE; row += ROWS_PER_LOAD) {
-            for (std::uint32_t column = 0; column <= COL_REDUCE_ODD_COLUMNS; column += COL_REDUCE_ODD_COLUMNS) {
-                const std::uint32_t addr = tile * ROWS_PER_TILE + row + column;
-                TT_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, addr);
-                TTI_SFPXOR(0 /*imm12_math*/, p_sfpu::LREG7, p_sfpu::LREG0, 0 /*instr_mod1*/);
-                TT_SFPSTORE(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, addr);
-            }
-        }
+    if (num_tiles == 1) {
+        flip_sign_bit_vectors(std::make_integer_sequence<std::uint32_t, FLIP_VECTORS_PER_TILE>{});
+        return;
     }
+    // Several tiles: the first chunk is recorded as it runs and replayed for the rest, its last store stepping the
+    // dest counter a chunk, so the issuing RISC stays ahead of the SFPU across the tile loop.
+    mark_dest_base();
+    lltt::record<lltt::Exec>(FLIP_REPLAY_START, 3 * FLIP_CHUNK);
+    flip_sign_bit_vectors(std::make_integer_sequence<std::uint32_t, FLIP_CHUNK - 1>{});
+    flip_sign_bit_vector<(FLIP_CHUNK - 1) * COL_REDUCE_ODD_COLUMNS, TILE_STEP_ADDR_MOD>();
+    for (std::uint32_t chunk = 1; chunk < num_tiles * (FLIP_VECTORS_PER_TILE / FLIP_CHUNK); chunk++) {
+        lltt::replay(FLIP_REPLAY_START, 3 * FLIP_CHUNK);
+    }
+    return_to_dest_base();
 }
 
 /**
@@ -2218,6 +2351,9 @@ inline void calculate_reduce(
             // Int32 (and bit-31-flipped UInt32) MAX/MIN: two's-complement compare-and-swap path (handles INT32_MIN).
             [[maybe_unused]] const std::uint32_t num_tiles = block_ct_dim * block_rt_dim;
             if constexpr (uint32_max_min) {
+                if (num_tiles > 1) {
+                    set_tile_step_addrmod<FLIP_CHUNK * COL_REDUCE_ODD_COLUMNS>();
+                }
                 flip_sign_bits(num_tiles);
             }
             if constexpr (reduce_dim == ReduceDim::REDUCE_COL) {
