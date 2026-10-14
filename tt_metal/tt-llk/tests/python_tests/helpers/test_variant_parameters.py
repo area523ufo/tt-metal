@@ -2256,7 +2256,9 @@ class RESHUFFLE_ROWS_FORM(TemplateParameter):
     replay: bool = False
 
     def convert_to_cpp(self) -> str:
-        return f"constexpr bool RESHUFFLE_REPLAY = {'true' if self.replay else 'false'};"
+        return (
+            f"constexpr bool RESHUFFLE_REPLAY = {'true' if self.replay else 'false'};"
+        )
 
 
 @dataclass

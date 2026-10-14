@@ -71,6 +71,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
 
     _llk_math_eltwise_unary_sfpu_init_<SfpuType::reshuffle_rows>();
     sfpu::reshuffle_rows_init();
+#ifdef ARCH_BLACKHOLE
     if constexpr (RESHUFFLE_REPLAY)
     {
         _llk_math_eltwise_unary_sfpu_params_(
@@ -81,6 +82,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
             0 /* dst_index */);
     }
     else
+#endif
     {
         _llk_math_eltwise_unary_sfpu_params_(
             sfpu::calculate_reshuffle_rows<false /* APPROXIMATION_MODE */>, 0 /* dst_index */, VectorMode::RC_custom, params.buffer_B[0] - 16 /* idx_addr */);

@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """reshuffle_rows scatter-add output[idx[i]] += input[i] over a tile (255 skips a row)."""
 
+import pytest
 import torch
+from helpers.chip_architecture import ChipArchitecture, get_chip_architecture
 from helpers.format_config import DataFormat
 from helpers.golden_generators import ELEMENTS_PER_TILE, TILE_DIM
 from helpers.llk_params import DestAccumulation, format_dict
@@ -120,6 +122,8 @@ def _run(formats, dest_acc, indices, replay):
     replay=[False, True],
 )
 def test_sfpu_reshuffle_rows(formats, dest_acc, pattern, replay):
+    if replay and get_chip_architecture() != ChipArchitecture.BLACKHOLE:
+        pytest.skip("the replayed form is Blackhole only")
     indices = INDEX_PATTERNS[pattern]
     res_rows, golden_rows = _run(formats, dest_acc, indices, replay)
     bad_rows = (res_rows != golden_rows).any(dim=1).nonzero().flatten().tolist()
