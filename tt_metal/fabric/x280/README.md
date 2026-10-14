@@ -265,11 +265,11 @@ reserved lines; way 0 remains general-purpose. The required partition is
 `WAYENABLE=1` (14 LIM ways). Preparation does not create this partition, prime
 ECC, boot resident idle, reset the ASIC, or flush caches.
 
-An operator must first establish that partition and resident idle, fresh cache
-placement for the reserved addresses, and exclusive device ownership covering
-the entire sequence of benchmark executables. Neither matching input bytes nor
-mask readback proves fresh placement. The runtime checks neither prerequisite;
-the caller establishes both.
+Whoever prepares must first establish that partition and resident idle, fresh
+cache placement for the reserved addresses, and exclusive device ownership
+covering the whole prepared sequence. Neither matching input bytes nor mask
+readback proves fresh placement. The runtime checks neither prerequisite; the
+caller establishes both. The pipeline_stage suite does so itself, below.
 
 Prime, open and boot as in "Using the X280 runtime", opening with
 `LimEccPrimingPolicy::RequirePrepared` and `LimShape{14}` so shape provisioning
@@ -277,11 +277,18 @@ cannot silently run the ECC primer. The runtime applies an increase-only shape
 only while every L2CPU remains in reset; it refuses a request that would expand
 LIM.
 
-The `x280_images` target builds the two operation-specific images; no
-executable in this tree runs them, the pipeline benchmarks do. Each runs as
-an active image on a tile in confirmed healthy resident idle, with no other
-session live: prepare once, run the compatible pipeline configurations
-sequentially on the same tile, then tear down.
+The `x280_images` target builds the two operation-specific images, and the
+pipeline_stage suite runs them. Each runs as an active image on a tile in
+confirmed healthy resident idle, with no other session live. In each pipeline
+executable the first device case prepares the session tile, the cases run
+sequentially on it, and the suite tears down after its last case, whatever the
+cases' outcomes. Because fresh placement cannot be read back, the suite prepares
+only on a tile its own process booted from reset-held; on a tile it found
+already running, every device case skips naming `tt-smi -r`. So each pipeline
+executable runs after an ASIC reset of its device. The images default to the
+build's; `X280_PINNED_INPUT_PREPARE_FW_IMAGE` and
+`X280_PINNED_INPUT_TEARDOWN_FW_IMAGE` name others. Each call site fixes its
+operation, so a default cannot select the opposite one.
 
 ID 7 uses the first 96-byte header in this region at `0x0A000AC0`. Its
 `decide_plain` configuration reseeds that complete header before warmup; it
@@ -301,8 +308,7 @@ The ordinary active-session STOP/cleanup and NoC-window cleanup still run.
 
 Both pipeline executables always require this prepared profile. The latency
 members and both transport-bandwidth executables run at the reset shape, so a
-chip left at 14 LIM ways skips them until an ASIC reset. Prepare every
-participating tile under the same external ownership.
+chip left at 14 LIM ways skips them until an ASIC reset.
 
 Final teardown requires confirmed resident idle and the pinned policy. It
 re-enables only way 1's replacement bit, preserving other bits, without flushing
@@ -311,11 +317,12 @@ the default partition requires separately authorized reset/provisioning.
 Do not run cache-flush, repartition, ECC-priming, or conflicting Zero Device
 experiments inside this prepared sequence.
 
-A failed preparation, unconfirmed cleanup, or process crash aborts the prepared
-sequence. Do not continue or use normal teardown as recovery: retain exclusive
-ownership and perform explicit recovery/repreparation before reuse. Closing a
-benchmark process neither unpins the region nor preserves a device lock
-for the next executable.
+A failed preparation or teardown, an unconfirmed cleanup, or a process crash
+aborts the prepared sequence. Do not continue or use normal teardown as
+recovery: reset the device and prepare again before reuse. In the suite, the
+failing case fails, every later case of that process fails naming the abort,
+and no teardown runs. Closing a case's runtime does not unpin the region; only
+teardown does.
 
 ### Runtime ownership
 
@@ -669,7 +676,8 @@ ninja -C build x280_images x280_abi_headers x280_runtime_host_tests x280_runtime
   x280_bench_host_tests x280_bench_device_tests x280_bench_release_selector_tests \
   x280_transport_bandwidth_tensix_to_x280 x280_transport_bandwidth_x280_to_tensix \
   x280_p2p_latency_x280_same_tile x280_p2p_latency_x280_peer_tile x280_p2p_latency_tensix_peer_tile \
-  x280_p2p_latency_erisc_peer_tile x280_p2p_latency_drisc_peer_tile
+  x280_p2p_latency_erisc_peer_tile x280_p2p_latency_drisc_peer_tile \
+  x280_pipeline_stage_route_compute x280_pipeline_stage_route_forward
 ctest --test-dir build -R x280      # image placement, pinned-input guards, header refusals, host, offline and mock-cluster tests; no device
 ```
 
@@ -677,13 +685,15 @@ ctest --test-dir build -R x280      # image placement, pinned-input guards, head
 |---|---|---|
 | `firmware-lim-idle.bin` | `src/lim_idle.c` | resident idle, the runtime prerequisite |
 | `firmware.bin` | `src/main.c` | active session success image (the sentinel) |
-| `firmware-pinned-input-prepare.bin`, `firmware-pinned-input-teardown.bin` | `src/x280_pinned_input.c` | pinned-input preparation and teardown (§ 1); no executable in this tree runs them |
+| `firmware-pinned-input-prepare.bin`, `firmware-pinned-input-teardown.bin` | `src/x280_pinned_input.c` | pinned-input preparation and teardown (§ 1), run by the pipeline_stage suite |
 | `firmware-atomic-bench.bin` | `src/atomic_bench.c` | cross-hart atomics micro-benchmark (§ 7); in the active-image contract set |
 | `firmware-active-session-fault.bin` | `src/active_session_fault.c` | traps and CEASEs hart 2, for `x280_active_failure_test` only |
 | `firmware-transport-bandwidth-x280-to-tensix.bin` | `src/transport_bandwidth_x280_to_tensix.cpp` | X280 -> Tensix member of transport_bandwidth, run by `x280_transport_bandwidth_x280_to_tensix`; the Tensix -> X280 member (`x280_transport_bandwidth_tensix_to_x280`) submits no X280 image |
 | `firmware-p2p-latency-x280-same-tile.bin` | `src/p2p_latency_x280_same_tile.cpp` | X280 hart <-> X280 hart on one tile, run by `x280_p2p_latency_x280_same_tile` |
 | `firmware-p2p-latency-x280-peer-tile.bin` | `src/p2p_latency_x280_peer_tile.cpp` | X280 <-> X280 on two L2CPU tiles, both participants, run by `x280_p2p_latency_x280_peer_tile` |
 | `firmware-p2p-latency-metal-peer-tile.bin` | `src/p2p_latency_metal_peer_tile.cpp` | X280 half of the Tensix, idle-ERISC and free-DRISC peers (`x280_p2p_latency_{tensix,erisc,drisc}_peer_tile`) |
+| `firmware-pipeline-stage-route-compute.bin` | `src/pipeline_stage_route_compute.cpp` | X280 L2CPU route_compute over the pinned input, run by `x280_pipeline_stage_route_compute` |
+| `firmware-pipeline-stage-route-forward.bin` | `src/pipeline_stage_route_forward.cpp` | X280 L2CPU route_forward over the first pinned header, run by `x280_pipeline_stage_route_forward` |
 
 Every image compiles with `-mcpu=sifive-x280 -march=rv64gc -mabi=lp64d
 -mcmodel=medany -O2 -Werror`, freestanding, and links with
