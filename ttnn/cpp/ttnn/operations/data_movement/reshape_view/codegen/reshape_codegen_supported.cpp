@@ -442,25 +442,6 @@ bool supported_by_codegen(const Tensor& input, const ttnn::Shape& logical_output
     return supported_by_codegen(input, logical_output_shape, input.memory_config());
 }
 
-bool is_demoted(
-    const Tensor& input,
-    const ttnn::Shape& logical_output_shape,
-    const std::optional<tt::tt_metal::CoreRangeSet>& sub_core_grids) {
-    if (input.storage_type() != ttnn::StorageType::DEVICE || input.layout() != Layout::TILE ||
-        input.dtype() == DataType::UINT16 || !is_tile_row_permutation(input.logical_shape(), logical_output_shape)) {
-        return false;
-    }
-    const uint32_t num_cores = reshape_core_grid(input, sub_core_grids).num_cores();
-    const auto rows = plan_tile_rows(input.logical_shape(), logical_output_shape);
-    if (rows.has_value() && !native_faster(input, *rows, num_cores)) {
-        return false;
-    }
-    // The output page pitch does not enter the comparison.
-    const auto lcm =
-        lcm_bit_exact(input.dtype()) ? tile_geometry(input, logical_output_shape, 0, num_cores) : std::nullopt;
-    return !(lcm.has_value() && lcm_beats_native(*lcm, num_cores));
-}
-
 std::optional<LaunchPlan> routed_launch_plan(
     const Tensor& input,
     const ttnn::Shape& logical_output_shape,

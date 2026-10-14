@@ -39,16 +39,6 @@ bool supported_by_codegen(
     const std::optional<tt::tt_metal::CoreRangeSet>& sub_core_grids = std::nullopt);
 bool supported_by_codegen(const Tensor& input, const ttnn::Shape& logical_output_shape);
 
-// Perf routing only, TILE: native's tiled reshape measures faster than every TILE program, so routing sends the call
-// to native. Tile rows wins when the full plan cuts reads 8x, saves 16+ reads per output tile, or copies whole face
-// halves over more than one native round; LCM when its tiles cost under 6x native's per round; the segment map on
-// widths that are not multiples of 32. Thresholds fitted on Blackhole. Never true for uint16, which native rejects,
-// nor for ROW_MAJOR, whose demotion routed_launch_plan decides from stick sizes and the static fit.
-bool is_demoted(
-    const Tensor& input,
-    const ttnn::Shape& logical_output_shape,
-    const std::optional<tt::tt_metal::CoreRangeSet>& sub_core_grids = std::nullopt);
-
 // The plan when routing sends this call to codegen (supported_by_codegen, not demoted, and some plan fits the L1 free
 // once the output is allocated), else nullopt.
 std::optional<LaunchPlan> routed_launch_plan(
