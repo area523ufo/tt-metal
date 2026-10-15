@@ -47,6 +47,30 @@ inline void _llk_pack_untilize_configure_addrmod_()
         .set(ADDR_MOD_2);
 }
 
+// The PACR that ends a face-row pass returns every counter the pass moved to zero, so a call leaves them as the init did.
+inline void _llk_pack_untilize_configure_pass_close_addrmod_(const bool row_ends_stream)
+{
+    constexpr addr_mod_pack_t pass_close {
+        .y_src = {.incr = 0, .clr = 1},
+        .y_dst = {.incr = 0, .clr = 1},
+        .z_src = {.incr = 0, .clr = 1},
+        .z_dst = {.incr = 0, .clr = 1},
+    };
+    if (row_ends_stream)
+    {
+        pass_close.set(ADDR_MOD_2);
+    }
+    else
+    {
+        pass_close.set(ADDR_MOD_3);
+    }
+}
+
+constexpr std::uint32_t _llk_pack_untilize_pass_close_addr_mod_(const bool row_ends_stream)
+{
+    return row_ends_stream ? ADDR_MOD_2 : ADDR_MOD_3;
+}
+
 // ADDR_MOD_3 also steps channel 1 Z by one tile row into L1, which ADDR_MOD_1 clears again.
 inline void _llk_pack_untilize_configure_first_tile_stream_addrmod_()
 {
@@ -161,7 +185,7 @@ inline void _llk_pack_untilize_mop_config_(
             p_pacr::CFG_CTXT_0,
             p_pacr::NO_ROW_PAD_ZERO,
             p_pacr::DST_ACCESS_STRIDED_MODE,
-            row_close_addr_mod,
+            _llk_pack_untilize_pass_close_addr_mod_(row_ends_stream),
             p_pacr::ADDR_CNT_CTXT_0,
             0,
             PACK_INTF_SEL,
@@ -481,11 +505,15 @@ inline void _llk_pack_untilize_init_sized_(
                 (dst_datum_size != 0) ? dst_datum_size * TILE_C_DIM : SCALE_DATUM_SIZE(pack_dst_format, TILE_C_DIM));
         }
     }
+    if constexpr (!split_row)
+    {
+        _llk_pack_untilize_configure_pass_close_addrmod_(row_ends_stream);
+    }
 
     const std::uint32_t z_stride = TILE_NUM_FACES * FACE_R_DIM * FACE_C_DIM * src_size;
     cfg_reg_rmw_tensix<PCK0_ADDR_CTRL_ZW_REG_0_Zstride_RMW>(z_stride);
 
-    // Each call loads this word into PCK0_ADDR_CTRL_XY_REG_1 and clears the register again, so no later pack sees it.
+    // Only the untilize steps the channel 1 Y counter, so the stride can stay until the uninit.
     const std::uint32_t ch1_y_stride = l1_row_step_by_cfg ? 0 : (output_addr_offset << PCK0_ADDR_CTRL_XY_REG_1_Ystride_SHAMT);
     TT_SETDMAREG(0, LOWER_HALFWORD(ch1_y_stride), 0, LO_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
     TT_SETDMAREG(0, UPPER_HALFWORD(ch1_y_stride), 0, HI_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
@@ -495,11 +523,14 @@ inline void _llk_pack_untilize_init_sized_(
         TT_SETDMAREG(0, UPPER_HALFWORD(output_addr_offset / 16), 0, HI_16(p_gpr_pack::TMP0));
     }
     TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
+    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR_OFFSET, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_XY_REG_1_Xstride_ADDR32);
     if (l1_row_step_by_cfg)
     {
         TTI_WRCFG(p_gpr_pack::TMP0, 0, SCRATCH_SEC2_val_ADDR32);
         TTI_NOP;
     }
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1011);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0111);
 
     // Always include setup calls for safety (as recommended by maintainer)
     // Program packer to pack out the correct number of datums per row
@@ -632,11 +663,15 @@ inline void _llk_pack_untilize_init_(
             cfg_reg_rmw_tensix<PCK0_ADDR_CTRL_ZW_REG_1_Zstride_RMW>(SCALE_DATUM_SIZE(pack_dst_format, TILE_C_DIM));
         }
     }
+    if constexpr (!split_row)
+    {
+        _llk_pack_untilize_configure_pass_close_addrmod_(row_ends_stream);
+    }
 
     const std::uint32_t z_stride = TILE_NUM_FACES * FACE_R_DIM * FACE_C_DIM * datum_size_in_bytes(pack_src_format);
     cfg_reg_rmw_tensix<PCK0_ADDR_CTRL_ZW_REG_0_Zstride_RMW>(z_stride);
 
-    // Each call loads this word into PCK0_ADDR_CTRL_XY_REG_1 and clears the register again, so no later pack sees it.
+    // Only the untilize steps the channel 1 Y counter, so the stride can stay until the uninit.
     const std::uint32_t ch1_y_stride = l1_row_step_by_cfg ? 0 : (output_addr_offset << PCK0_ADDR_CTRL_XY_REG_1_Ystride_SHAMT);
     TT_SETDMAREG(0, LOWER_HALFWORD(ch1_y_stride), 0, LO_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
     TT_SETDMAREG(0, UPPER_HALFWORD(ch1_y_stride), 0, HI_16(p_gpr_pack::OUTPUT_ADDR_OFFSET));
@@ -646,11 +681,14 @@ inline void _llk_pack_untilize_init_(
         TT_SETDMAREG(0, UPPER_HALFWORD(output_addr_offset / 16), 0, HI_16(p_gpr_pack::TMP0));
     }
     TTI_STALLWAIT(p_stall::STALL_CFG, p_stall::THCON);
+    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR_OFFSET, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_XY_REG_1_Xstride_ADDR32);
     if (l1_row_step_by_cfg)
     {
         TTI_WRCFG(p_gpr_pack::TMP0, 0, SCRATCH_SEC2_val_ADDR32);
         TTI_NOP;
     }
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1011);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0111);
 
     // Always include setup calls for safety (as recommended by maintainer)
     // Program packer to pack out the correct number of datums per row
@@ -722,15 +760,21 @@ inline void _llk_pack_untilize_(const std::uint32_t address, const std::uint32_t
     For input widths greater than 8 tiles, input is split into blocks, each block the size of block_ct_dim;
     a row may also be split into blocks of different widths. This function is called for each block.
     */
-    // program_packer_untilized_destination<block_ct_dim, full_ct_dim, diagonal>(address, pack_dst_format);
     program_packer_destination(address);
-    TTI_WRCFG(p_gpr_pack::OUTPUT_ADDR_OFFSET, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_XY_REG_1_Xstride_ADDR32);
     const std::uint32_t num_faces_per_rdim_tile = (num_faces > 2) ? 2 : 1;
 
     const std::uint32_t tile_dst_offset = tile_dst_ct_offset + tile_dst_rt_offset;
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
-    TT_SETADC(p_setadc::PAC, p_setadc::CH_0, p_setadc::SET_W, tile_dst_offset);
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1011);
+    if constexpr (narrow_row)
+    {
+        // A split narrow row keeps ADDR_MOD_3 for its left half, so its passes do not end at zero counters.
+        TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0101);
+        TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1011);
+    }
+    // The init and every call leave W at zero.
+    if (tile_dst_offset != 0)
+    {
+        TT_SETADC(p_setadc::PAC, p_setadc::CH_0, p_setadc::SET_W, tile_dst_offset);
+    }
 
     ckernel::ckernel_template::run();
     if (num_faces_per_rdim_tile > 1)
@@ -740,8 +784,14 @@ inline void _llk_pack_untilize_(const std::uint32_t address, const std::uint32_t
         ckernel::ckernel_template::run();
     }
 
-    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1010);
-    TTI_WRCFG(p_gpr::ZERO, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_XY_REG_1_Xstride_ADDR32);
+    if constexpr (narrow_row)
+    {
+        TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1010);
+    }
+    if (tile_dst_offset != 0)
+    {
+        TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0010);
+    }
 }
 
 /**
@@ -756,4 +806,5 @@ inline void _llk_pack_untilize_uninit_(const std::uint32_t pack_src_format)
     const std::uint32_t z_stride = SCALE_DATUM_SIZE(pack_src_format, FACE_R_DIM * FACE_C_DIM);
     cfg_reg_rmw_tensix<PCK0_ADDR_CTRL_ZW_REG_0_Zstride_RMW>(z_stride);
     TTI_WRCFG(p_gpr::ZERO, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_ZW_REG_1_Zstride_ADDR32);
+    TTI_WRCFG(p_gpr::ZERO, p_cfg::WRCFG_32b, PCK0_ADDR_CTRL_XY_REG_1_Xstride_ADDR32);
 }

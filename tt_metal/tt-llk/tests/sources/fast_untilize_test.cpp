@@ -409,7 +409,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
                             }
                             if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
                             {
-                                _llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DEST_SYNC, is_fp32_dest_acc_en>();
+                                _llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DEST_SYNC, is_fp32_dest_acc_en, true, true>();
                             }
                         }
                         chunk_col += unit_dim;
@@ -436,7 +436,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
                     ckernel::_llk_pack_fast_untilize_block_<FAST_UNTILIZE_UNIT_DIM>(chunk_address, unit_dim, prev_pack_unit_dim);
                     if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
                     {
-                        _llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DEST_SYNC, is_fp32_dest_acc_en>();
+                        _llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DEST_SYNC, is_fp32_dest_acc_en, true, true>();
                     }
                 }
             }
@@ -469,7 +469,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
                             chunk_address, unit_dim, prev_pack_unit_dim, output_row_stride_16B);
                         if constexpr (PERF_RUN_TYPE == PerfRunType::L1_TO_L1)
                         {
-                            _llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DEST_SYNC, is_fp32_dest_acc_en>();
+                            _llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DEST_SYNC, is_fp32_dest_acc_en, true, true>();
                         }
                         chunk_col += unit_dim;
                     }

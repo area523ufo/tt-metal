@@ -284,7 +284,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
                         PACK_UNTILIZE_DST_DATUM_SIZE>(
                         PERF_ADDRESS(PERF_OUTPUT, i), formats.pack_dst, FACE_R_DIM, 4 /* num_faces */, 0 /* tile_dst_rt_offset */);
 #ifdef ARCH_BLACKHOLE
-                    _llk_pack_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en, unpack_to_dest>();
+                    _llk_pack_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en, unpack_to_dest, true>();
 #else
                     _llk_pack_dest_section_done_<DstSync::SyncHalf, is_fp32_dest_acc_en>();
 #endif

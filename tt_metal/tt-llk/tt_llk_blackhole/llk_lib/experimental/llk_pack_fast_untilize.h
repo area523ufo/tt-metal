@@ -90,6 +90,9 @@ inline void _llk_pack_fast_untilize_configure_addrmod_()
     {
         addr_mod_pack_t {.y_src = {.incr = 1}, .z_src = {.clr = 1}}.set(ADDR_MOD_1);
     }
+
+    // ADDR_MOD_2: the last PACR of a phase or pass returns the source counters to zero, as the init leaves them.
+    addr_mod_pack_t {.y_src = {.clr = 1}, .z_src = {.clr = 1}}.set(ADDR_MOD_2);
 }
 
 // MOP body: 16 outer iterations x 2 inner PACRs.
@@ -127,9 +130,9 @@ inline std::uint32_t _llk_pack_fast_untilize_tail_read_intf_(const std::uint32_t
 }
 
 template <std::uint32_t max_unit_dim = FAST_UNTILIZE_MAX_UNIT_DIM>
-inline std::uint32_t _llk_pack_fast_untilize_last_outer_pacr_(const std::uint32_t unit_dim, const bool last)
+inline std::uint32_t _llk_pack_fast_untilize_last_outer_pacr_(const std::uint32_t unit_dim, const bool last, const std::uint32_t addr_mod = ADDR_MOD_1)
 {
-    return _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, _llk_pack_fast_untilize_tail_read_intf_<max_unit_dim>(unit_dim), last ? 1 : 0, 0);
+    return _llk_pack_fast_untilize_row_pacr_(addr_mod, _llk_pack_fast_untilize_tail_read_intf_<max_unit_dim>(unit_dim), last ? 1 : 0, 0);
 }
 
 // Rows of 5 to 8 tiles: 3 PACRs per row (START_OP, OP0, then OP1 on the tail) or 4 (two inner iterations, the last OP1
@@ -205,7 +208,7 @@ inline void _llk_pack_fast_untilize_last_row_(const std::uint32_t unit_dim, cons
     {
         TT_INSN(_llk_pack_fast_untilize_row_pacr_(ADDR_MOD_0, p_pacr::ALL_INTF_ACTIVE, 0, 0));
     }
-    TT_INSN(_llk_pack_fast_untilize_last_outer_pacr_<max_unit_dim>(unit_dim, last));
+    TT_INSN(_llk_pack_fast_untilize_last_outer_pacr_<max_unit_dim>(unit_dim, last, ADDR_MOD_2));
 }
 
 inline void _llk_pack_fast_untilize_reset_src_counters_()
@@ -318,10 +321,11 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     if constexpr (full_ct_dim > block_ct_dim)
     {
         const std::uint32_t output_row_stride = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM);
-        _llk_pack_fast_untilize_reset_src_counters_();
         _llk_pack_fast_untilize_program_output_row_stride_(output_row_stride);
-        _llk_pack_fast_untilize_reset_output_row_counter_();
     }
+    // Calls start from these counters and leave them so.
+    TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1011);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0111);
 }
 
 template <std::uint32_t phase_offset>
@@ -369,16 +373,14 @@ inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const st
         _llk_pack_fast_untilize_mop_config_<block_ct_dim>(unit_dim, false, FAST_UNTILIZE_PHASE_ROWS - 1);
         prev_unit_dim = unit_dim;
     }
-    _llk_pack_fast_untilize_select_phase_<fast_untilize_strip_rows(block_ct_dim)>();
-    _llk_pack_fast_untilize_reset_src_counters_();
+    // W steps the source by the init's W stride, so the top strip is W strides above the bottom one.
+    TTI_SETADC(p_setadc::PAC, p_setadc::CH_0, p_setadc::SET_W, fast_untilize_strip_rows(block_ct_dim) / FAST_UNTILIZE_PHASE_PAIR_STRIDE_ROWS);
     ckernel_template::run();
     _llk_pack_fast_untilize_last_row_<block_ct_dim>(unit_dim, false);
 
-    _llk_pack_fast_untilize_select_phase_<FAST_UNTILIZE_PACK_BOTTOM_STRIP_DEST_TARGET_OFFSET>();
-    _llk_pack_fast_untilize_reset_src_counters_();
+    TTI_SETADC(p_setadc::PAC, p_setadc::CH_0, p_setadc::SET_W, 0);
     ckernel_template::run();
     _llk_pack_fast_untilize_last_row_<block_ct_dim>(unit_dim, true);
-    _llk_pack_fast_untilize_restore_pack_counters_<false>();
 }
 
 // The packer carries the destination Y offset (ADC.Y * Ystride) relative to the
@@ -485,7 +487,7 @@ inline void _llk_pack_fast_untilize_pass_mop_config_(const std::uint32_t unit_di
     const std::uint32_t tail_intf     = (unit_dim & 1) ? p_pacr::TWO_INTFS_ACTIVE : p_pacr::ALL_INTF_ACTIVE;
     const std::uint32_t pair_pacr     = _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_0, p_pacr::ALL_INTF_ACTIVE, 0, strided ? 1 : 0);
     const std::uint32_t tail_pacr     = _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, tail_intf, strided ? 1 : 0, 0);
-    const std::uint32_t last_pacr     = _llk_pack_fast_untilize_row_pacr_(ADDR_MOD_1, tail_intf, 1, 0);
+    const std::uint32_t last_pacr     = _llk_pack_fast_untilize_row_pacr_(strided ? ADDR_MOD_1 : ADDR_MOD_2, tail_intf, 1, 0);
     const std::uint32_t pacrs_per_row = (unit_dim + 1) / 2;
     if (pacrs_per_row == 1)
     {
@@ -523,11 +525,9 @@ inline void _llk_pack_fast_untilize_pass_block_(
         _llk_pack_fast_untilize_pass_mop_config_(unit_dim, FAST_UNTILIZE_PHASE_ROWS, false);
         prev_unit_dim = unit_dim | FAST_UNTILIZE_PASS_MOP_KEY;
     }
+    // The bottom strip is the DEST window itself and the counters start at zero.
     program_packer_destination(address + pass * FAST_UNTILIZE_PHASE_ROWS * output_row_stride_16B);
-    _llk_pack_fast_untilize_select_phase_<FAST_UNTILIZE_PACK_BOTTOM_STRIP_DEST_TARGET_OFFSET>();
-    _llk_pack_fast_untilize_reset_src_counters_();
     ckernel_template::run();
-    _llk_pack_fast_untilize_restore_pack_counters_<false>();
 }
 
 // One face-pair pass of a unit inside a wider row; `address` is the unit's column in output row 0.
