@@ -6,7 +6,7 @@
 import pathlib
 import sys
 
-_PERF = pathlib.Path(__file__).parents[2] / "perf"
+_PERF = pathlib.Path(__file__).parents[3] / "perf"
 sys.path.insert(0, str(_PERF))
 from pr_gate_digest import build_text
 
