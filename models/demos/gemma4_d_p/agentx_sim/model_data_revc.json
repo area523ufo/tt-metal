@@ -558,7 +558,7 @@
  ],
  "_measured_note": "whole-model g4_perf sweep 2026-10-08 18:01 UTC, same box and tree, device time (106k = 13 x 8k, rounded up to whole chunks)",
  "calibration": {
-  "_note": "Silicon replays of three AgentX slices (bh-glx-110-d06u02, main 836bf0b + the batched prefill runtime, 2026-10-14): device time per step over this model (scale) and host time per step (busy minus trace replay), per scheduler: unit x budget, keyed by unit for one request per step and 'batched' for 2k lanes.",
+  "_note": "Silicon replays of three AgentX slices (bh-glx-110-d06u02, main 836bf0b + the batched prefill runtime, 2026-10-14): device time per step over this model (scale) and host time per step (busy minus trace replay), per scheduler: unit x budget, keyed by unit for one request per step and 'batched' for 2k lanes. The batched scale is per component (dense incl. fixed, global attention, sliding attention): the ratios are fitted to traced 2k steps of 1-4 lanes at prefixes 0-224k, and the level (x1.007) to busy time over seven AgentX slice replays. Its host time is per lane count, from the demo's step log (bh-glx-120-c05u08, 2026-10-15).",
   "8192": {
    "scale": 1.125,
    "host_ms": 3.3
@@ -572,8 +572,17 @@
    "host_ms": 3.3
   },
   "batched": {
-   "scale": 1.054,
-   "host_ms": 6.3
+   "scale": {
+    "dense": 0.904,
+    "gattn": 1.215,
+    "lattn": 1.196
+   },
+   "host_ms": {
+    "1": 3.8,
+    "2": 6.9,
+    "3": 7.4,
+    "4": 7.6
+   }
   }
  }
 }

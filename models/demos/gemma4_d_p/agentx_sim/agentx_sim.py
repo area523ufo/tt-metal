@@ -294,7 +294,7 @@ def run(
             if r[6]:  # first piece: load the cached prefix
                 extra += hit_load_us_per_ktok * r[3] / 1000.0
                 r[6] = False
-        dt = (model.step(batch)["total"] * scale + extra) / 1e6 + host_ms / 1e3
+        dt = (model.device_us(batch, scale) + extra) / 1e6 + model.host_ms(host_ms, batch) / 1e3
         t += dt
         busy += dt
         steps += 1

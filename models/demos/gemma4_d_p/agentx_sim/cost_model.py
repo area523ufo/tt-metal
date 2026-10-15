@@ -94,6 +94,20 @@ class Model:
         out["total"] = sum(out.values())
         return out
 
+    def device_us(self, batch, scale=1.0):
+        """Step device time; scale is one factor or per-component factors {dense, gattn, lattn} (fixed goes with
+        dense), since silicon departs from the model differently for the dense and attention parts."""
+        s = self.step(batch)
+        if not isinstance(scale, dict):
+            return s["total"] * scale
+        return (s["dense"] + s["fixed"]) * scale["dense"] + s["gattn"] * scale["gattn"] + s["lattn"] * scale["lattn"]
+
+    @staticmethod
+    def host_ms(host_ms, lanes):
+        """Host time per step: one value, or per lane count {"1": ..., "4": ...} (a multi-lane step also stages the
+        per-lane slot and prefix vectors)."""
+        return host_ms[str(len(lanes))] if isinstance(host_ms, dict) else host_ms
+
     def unbatched_prompt_s(self, C, tokens):
         n = math.ceil(tokens / C)
         return sum(self.step([(C, i * C)])["total"] for i in range(n)) / 1e6

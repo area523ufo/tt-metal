@@ -110,7 +110,7 @@ def predict(model, reqs, mode, num_slots=4, host_ms=0.0, scale=1.0):
         else:
             plan = [[active[0], 1]]
         lanes = [(width, e[1] + j * width) for e, n in plan for j in range(n)]
-        dt = model.step(lanes)["total"] * scale / 1e6 + host_ms / 1e3
+        dt = model.device_us(lanes, scale) / 1e6 + model.host_ms(host_ms, lanes) / 1e3
         t += dt
         busy += dt
         steps += 1
