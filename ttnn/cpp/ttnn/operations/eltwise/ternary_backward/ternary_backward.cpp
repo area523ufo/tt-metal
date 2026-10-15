@@ -55,29 +55,40 @@ std::vector<Tensor> addcdiv_bw(
     // infinity below |tensor2| = 1.0842e-19, zero above 2^63 (see the note in rdiv_bw).
     // Sharing the reciprocal is also one op cheaper than squaring and inverting.
     Tensor recip_tensor2 = ttnn::reciprocal(tensor2, output_mem_config);
-    Tensor grad_a = ttnn::multiply(
-        ttnn::multiply(grad, value, std::nullopt, output_mem_config), recip_tensor2, std::nullopt, output_mem_config);
+    Tensor grad_val = ttnn::multiply(grad, value, std::nullopt, output_mem_config);
+    Tensor grad_a = ttnn::multiply(grad_val, recip_tensor2, std::nullopt, output_mem_config);
+    Tensor is_t2_zero = ttnn::eqz(tensor2, output_mem_config);
     grad_tensor.emplace_back(ttnn::where(
-        ttnn::eqz(tensor2, output_mem_config),
-        ttnn::where(ttnn::eqz(grad, output_mem_config), t_nan, t_inf, output_mem_config),
+        is_t2_zero,
+        ttnn::where(
+            ttnn::eqz(grad_val, output_mem_config),
+            t_nan,
+            ttnn::multiply(ttnn::sign(grad_val, output_mem_config), t_inf, std::nullopt, output_mem_config),
+            output_mem_config),
         grad_a,
         output_mem_config));
-    Tensor tmp = ttnn::multiply(
-        ttnn::multiply(ttnn::neg(grad, output_mem_config), value, std::nullopt, output_mem_config),
-        tensor1,
-        std::nullopt,
-        output_mem_config);
-    Tensor grad_b = ttnn::multiply(
-        ttnn::multiply(tmp, recip_tensor2, std::nullopt, output_mem_config),
-        recip_tensor2,
-        std::nullopt,
-        output_mem_config);
+    Tensor t1_over_t2 = ttnn::multiply(tensor1, recip_tensor2, std::nullopt, output_mem_config);
     recip_tensor2.deallocate();
+    Tensor grad_b = ttnn::multiply(
+        ttnn::neg(grad_a, output_mem_config), t1_over_t2, std::nullopt, output_mem_config);
+    t1_over_t2.deallocate();
+    Tensor num_b_sign = ttnn::multiply(
+        ttnn::neg(ttnn::sign(grad_val, output_mem_config), output_mem_config),
+        ttnn::sign(tensor1, output_mem_config),
+        std::nullopt,
+        output_mem_config);
+    grad_val.deallocate();
     grad_tensor.emplace_back(ttnn::where(
-        ttnn::eqz(tensor2, output_mem_config),
-        ttnn::where(ttnn::eqz(grad, output_mem_config), t_nan, -t_inf, output_mem_config),
+        is_t2_zero,
+        ttnn::where(
+            ttnn::eqz(num_b_sign, output_mem_config),
+            t_nan,
+            ttnn::multiply(num_b_sign, t_inf, std::nullopt, output_mem_config),
+            output_mem_config),
         grad_b,
         output_mem_config));
+    is_t2_zero.deallocate();
+    num_b_sign.deallocate();
     return grad_tensor;
 }
 
