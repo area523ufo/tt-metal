@@ -244,7 +244,17 @@ def _run_mixed(
 
 
 def _run_scalar(
-    device, op_name, mem_config, dtype_tt, shape, scalar, lhs_act=None, post_act=None, pcc=None, out_mem=None
+    device,
+    op_name,
+    mem_config,
+    dtype_tt,
+    shape,
+    scalar,
+    lhs_act=None,
+    post_act=None,
+    pcc=None,
+    out_mem=None,
+    infer_output_config=False,
 ):
     # Tensor-SCALAR sibling of _run: operand A is a tensor, the RHS is a Python number (not a tensor),
     # and the golden uses that same scalar. Same op->torch map, PCC thresholds, and degenerate-constant
@@ -268,7 +278,11 @@ def _run_scalar(
 
     a_tt = ttnn.from_torch(a, dtype=dtype_tt, device=device, layout=ttnn.TILE_LAYOUT, memory_config=mem_config)
 
-    kwargs = {"memory_config": out_mem if out_mem is not None else mem_config, "dtype": dtype_tt}
+    # infer_output_config omits memory_config so the op derives the output config from a's, which routes through
+    # the default-config path instead of an explicit one. out_mem overrides the output config explicitly.
+    kwargs = {"dtype": dtype_tt}
+    if not infer_output_config:
+        kwargs["memory_config"] = out_mem if out_mem is not None else mem_config
     if post_act is not None:
         kwargs["activations"] = _act(post_act)
     if lhs_act is not None:

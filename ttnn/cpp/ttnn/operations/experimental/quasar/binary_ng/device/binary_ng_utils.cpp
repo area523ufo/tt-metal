@@ -797,8 +797,11 @@ bool is_native_L1_sharding(
     const bool shard_specs_comparable = a.memory_config().shard_spec().has_value() && c.shard_spec().has_value();
     // Per-core work comes from a's shard while the output buffer is aliased as a CB, so a and c must
     // agree or the output is addressed on cores where it is not allocated -- which hangs the device. An
-    // unsupplied output config is derived from a's, so the common case still matches.
-    const bool c_shard_matches_a = shard_specs_comparable && *c.shard_spec() == *a.memory_config().shard_spec();
+    // unsupplied output config is derived from a's, so the common case still matches. ShardSpec equality
+    // covers grid, shape and orientation but not the memory layout, and HEIGHT and BLOCK sharding place
+    // shard i on different cores for the same spec, so the layouts must match as well.
+    const bool c_shard_matches_a = shard_specs_comparable && c.memory_layout() == a.memory_config().memory_layout() &&
+                                   *c.shard_spec() == *a.memory_config().shard_spec();
 
     // Scalar value path (b is not a tensor)
     if (!b.has_value() && a.memory_config().is_sharded()) {
