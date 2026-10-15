@@ -148,6 +148,15 @@ _SRCAB_ONLY_FORMATS = {
     DataFormat.UInt8_2x: ChipArchitecture.QUASAR,
 }
 
+# The 2x-packed register formats each L1 input format may unpack to (mirrors the Quasar
+# unpacker's legal format pairs). An input format missing here takes no hint.
+_REGISTER_FORMAT_HINTS_BY_INPUT = {
+    DataFormat.MxFp4: (DataFormat.MxFp4_2x_A, DataFormat.MxFp4_2x_B),
+    DataFormat.Int8: (DataFormat.Int8_2x,),
+    DataFormat.UInt8: (DataFormat.UInt8_2x,),
+    DataFormat.Int4: (DataFormat.Int8_2x,),
+}
+
 
 def infer_unpack_out(
     input_format: DataFormat,
@@ -170,10 +179,11 @@ def infer_unpack_out(
         output_format: The final desired output format
         is_fp32_dest_acc_en: Whether FP32 accumulation is enabled
         unpacking_to_dest: Indicates whether unpacking targets the destination register
-        register_format_hint: Optional opt-in for a SrcA/SrcB-only register format
-            (MxFp4_2x_A or MxFp4_2x_B). When set, returned as the unpack-out format
-            instead of the default. Only valid when input_format == MxFp4; the hint is
-            compatible with any output_format (output_format is not constrained here).
+        register_format_hint: Optional opt-in for a SrcA/SrcB-only 2x-packed register format.
+            When set, returned as the unpack-out format instead of the default. Valid pairs:
+            MxFp4 -> MxFp4_2x_A/B, Int8 or Int4 -> Int8_2x, UInt8 -> UInt8_2x; other input
+            formats take no hint. The hint is compatible with any output_format
+            (output_format is not constrained here).
             The exponent family it implies for downstream math/pack is derived in
             infer_data_formats via infer_downstream_unpack_out (2x_A -> Float16, 2x_B -> Float16_b).
 
@@ -210,19 +220,8 @@ def infer_unpack_out(
             raise ValueError(
                 f"{register_format_hint.name} is only valid on the four-row Quasar variant"
             )
-        if input_format == DataFormat.MxFp4 and register_format_hint not in [
-            DataFormat.MxFp4_2x_A,
-            DataFormat.MxFp4_2x_B,
-        ]:
-            raise ValueError(
-                f"register_format_hint={register_format_hint.name} is not compatible with input_format={input_format.name}."
-            )
-        if (
-            input_format == DataFormat.Int8
-            and register_format_hint != DataFormat.Int8_2x
-        ) or (
-            input_format == DataFormat.UInt8
-            and register_format_hint != DataFormat.UInt8_2x
+        if register_format_hint not in _REGISTER_FORMAT_HINTS_BY_INPUT.get(
+            input_format, ()
         ):
             raise ValueError(
                 f"register_format_hint={register_format_hint.name} is not compatible with input_format={input_format.name}."
@@ -656,8 +655,8 @@ def data_formats(
         unpacking_to_srcs: Whether the unpacker target is SrcS (default: False)
         register_format_hint: Optional opt-in for a SrcA/SrcB-only register format (e.g. MxFp4_2x_A / MxFp4_2x_B). When set, the inferred
                               unpack_A_dst / unpack_B_dst become the hint instead of the default (e.g. for MxFp4 input, Float16_b). Honored
-                              by the inference path only; must be paired with `disable_format_inference=False`. Currently valid only when
-                              `input_format == DataFormat.MxFp4`; the hint is compatible with any `output_format`. The exponent family it
+                              by the inference path only; must be paired with `disable_format_inference=False`. Valid pairs: MxFp4 ->
+                              MxFp4_2x_A/B, Int8 or Int4 -> Int8_2x, UInt8 -> UInt8_2x; the hint is compatible with any `output_format`. The exponent family it
                               implies for downstream math/pack is derived via infer_downstream_unpack_out (2x_A -> Float16, 2x_B -> Float16_b).
     Returns:
         A list of FormatConfig objects of length num_iterations
