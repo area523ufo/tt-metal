@@ -156,7 +156,7 @@ ALWI void fast_untilize_block(
                     PACK((llk_packer_wait_for_math_done()));
                     PACK((llk_pack_fast_untilize_pass_block<full_ct_dim>(
                         ocb, output_tile_index, tiles_done, unit_dim, pass, prev_pack_unit_dim)));
-                    PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, is_fp32_dest_acc_en>()));
+                    PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, is_fp32_dest_acc_en, true, true>()));
                 }
             } else if constexpr (full_ct_dim > FAST_UNTILIZE_MAX_PASS_UNIT_DIM) {
                 MATH((_llk_math_wait_for_dest_available_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE>()));
@@ -168,7 +168,7 @@ ALWI void fast_untilize_block(
                 PACK((llk_packer_wait_for_math_done()));
                 PACK((llk_pack_fast_untilize_block_strided<FAST_UNTILIZE_MAX_UNIT_DIM_16BIT_DEST, full_ct_dim>(
                     ocb, output_tile_index, tiles_done, unit_dim, prev_pack_unit_dim)));
-                PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, is_fp32_dest_acc_en>()));
+                PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, is_fp32_dest_acc_en, true, true>()));
             }
             tiles_done += unit_dim;
         }
@@ -190,7 +190,7 @@ ALWI void fast_untilize_block(
 
         PACK((llk_packer_wait_for_math_done()));
         PACK((llk_pack_fast_untilize_block<max_unit_dim>(ocb, output_tile_index, unit_dim)));
-        PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, is_fp32_dest_acc_en>()));
+        PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, is_fp32_dest_acc_en, true, true>()));
     } else {
         std::uint32_t tiles_done = 0;
         constexpr std::uint32_t first_unpack_unit_dim = fast_untilize_next_unit_dim<max_unit_dim>(full_ct_dim);
@@ -210,7 +210,7 @@ ALWI void fast_untilize_block(
             PACK((llk_packer_wait_for_math_done()));
             PACK((llk_pack_fast_untilize_block_strided<max_unit_dim, full_ct_dim>(
                 ocb, output_tile_index, tiles_done, unit_dim, prev_pack_unit_dim)));
-            PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, is_fp32_dest_acc_en>()));
+            PACK((_llk_pack_dest_section_done_<FAST_UNTILIZE_INTERNAL_DST_SYNC_MODE, is_fp32_dest_acc_en, true, true>()));
 
             tiles_done += unit_dim;
         }

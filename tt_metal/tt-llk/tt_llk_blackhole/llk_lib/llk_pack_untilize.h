@@ -47,6 +47,77 @@ inline void _llk_pack_untilize_configure_addrmod_()
         .set(ADDR_MOD_2);
 }
 
+namespace ckernel::packer
+{
+// A run of blocks written one after another keeps L1_Dest_addr at the run's first block, and a call into a later block
+// sets the channel 1 W counter (W stride one block) for its PACRs only, so no other pack sees it.
+inline std::uint32_t untilize_run_base   = 0;
+inline std::uint32_t untilize_run_last   = 0;
+inline std::uint32_t untilize_run_last_w = 0;
+inline std::uint32_t untilize_run_step   = 0;
+inline std::uint32_t untilize_run_limit  = 0;
+} // namespace ckernel::packer
+
+// step_16B: L1 size of one block, 0 to program every block. reach_bytes: channel 1 offset a block adds after its start.
+inline void _llk_pack_untilize_run_init_(const std::uint32_t step_16B, const std::uint32_t reach_bytes)
+{
+    constexpr std::uint32_t window_bytes = 256 * 1024;
+    const std::uint32_t step_bytes       = step_16B * 16;
+    const bool usable                    = (step_16B != 0) && (step_bytes <= 0xFFFF) && (step_bytes + reach_bytes < window_bytes);
+    const std::uint32_t blocks           = usable ? (window_bytes - reach_bytes - 1) / step_bytes + 1 : 1;
+    ckernel::packer::untilize_run_step   = step_16B;
+    ckernel::packer::untilize_run_limit  = (blocks > 0xFF) ? 0xFF : blocks;
+    ckernel::packer::untilize_run_base   = 0xFFFFFFFF;
+    ckernel::packer::untilize_run_last   = 0xFFFFFFFF;
+    ckernel::packer::untilize_run_last_w = 0;
+    cfg_reg_rmw_tensix<PCK0_ADDR_CTRL_ZW_REG_1_Wstride_RMW>(usable ? step_bytes : 0);
+}
+
+// Returns the block's channel 1 W, which the call returns to zero after its last PACR.
+inline std::uint32_t _llk_pack_untilize_program_destination_(const std::uint32_t address)
+{
+    using namespace ckernel::packer;
+    if (untilize_run_step == 0)
+    {
+        program_packer_destination(address);
+        return 0;
+    }
+    std::uint32_t w;
+    if (address == untilize_run_last)
+    {
+        w = untilize_run_last_w;
+    }
+    else if (address == untilize_run_base)
+    {
+        w = 0;
+    }
+    else if ((address == untilize_run_last + untilize_run_step) && (untilize_run_last_w + 1 < untilize_run_limit))
+    {
+        w = untilize_run_last_w + 1;
+    }
+    else
+    {
+        program_packer_destination(address);
+        untilize_run_base = address;
+        w                 = 0;
+    }
+    untilize_run_last   = address;
+    untilize_run_last_w = w;
+    if (w != 0)
+    {
+        TT_SETADC(p_setadc::PAC, p_setadc::CH_1, p_setadc::SET_W, w);
+    }
+    return w;
+}
+
+inline void _llk_pack_untilize_end_destination_(const std::uint32_t w)
+{
+    if (w != 0)
+    {
+        TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b1000);
+    }
+}
+
 // The PACR that ends a face-row pass returns every counter the pass moved to zero, so a call leaves them as the init did.
 inline void _llk_pack_untilize_configure_pass_close_addrmod_(const bool row_ends_stream)
 {
@@ -530,7 +601,10 @@ inline void _llk_pack_untilize_init_sized_(
         TTI_NOP;
     }
     TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0111);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b1111);
+    const std::uint32_t call_bytes = rows_per_call * output_addr_offset;
+    _llk_pack_untilize_run_init_(
+        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0, call_bytes);
 
     // Always include setup calls for safety (as recommended by maintainer)
     // Program packer to pack out the correct number of datums per row
@@ -688,7 +762,10 @@ inline void _llk_pack_untilize_init_(
         TTI_NOP;
     }
     TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0111);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b1111);
+    const std::uint32_t call_bytes = rows_per_call * output_addr_offset;
+    _llk_pack_untilize_run_init_(
+        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0, call_bytes);
 
     // Always include setup calls for safety (as recommended by maintainer)
     // Program packer to pack out the correct number of datums per row
@@ -760,7 +837,15 @@ inline void _llk_pack_untilize_(const std::uint32_t address, const std::uint32_t
     For input widths greater than 8 tiles, input is split into blocks, each block the size of block_ct_dim;
     a row may also be split into blocks of different widths. This function is called for each block.
     */
-    program_packer_destination(address);
+    std::uint32_t run_w = 0;
+    if constexpr (narrow_row)
+    {
+        program_packer_destination(address);
+    }
+    else
+    {
+        run_w = _llk_pack_untilize_program_destination_(address);
+    }
     const std::uint32_t num_faces_per_rdim_tile = (num_faces > 2) ? 2 : 1;
 
     const std::uint32_t tile_dst_offset = tile_dst_ct_offset + tile_dst_rt_offset;
@@ -792,6 +877,7 @@ inline void _llk_pack_untilize_(const std::uint32_t address, const std::uint32_t
     {
         TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0010);
     }
+    _llk_pack_untilize_end_destination_(run_w);
 }
 
 /**

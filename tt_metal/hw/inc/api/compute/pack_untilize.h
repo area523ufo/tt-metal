@@ -326,7 +326,7 @@ ALWI void pack_untilize_block(uint32_t icb, uint32_t block_rt_dim, uint32_t ocb,
         PACK((llk_packer_wait_for_math_done()));
         PACK((llk_pack_untilize<block_ct_dim, full_ct_dim>(1 /*num_blocks*/, ocb, block_c_index)));
 #ifdef ARCH_BLACKHOLE
-        PACK((llk_pack_dest_section_done<is_fp32_dest_acc_en, math_clears_dest>()));
+        PACK((llk_pack_dest_section_done<is_fp32_dest_acc_en, math_clears_dest, true>()));
 #else
         PACK((llk_pack_dest_section_done<is_fp32_dest_acc_en>()));
 #endif
