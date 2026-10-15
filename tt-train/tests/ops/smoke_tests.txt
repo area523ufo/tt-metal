@@ -1,0 +1,71 @@
+# One representative gtest per ttml op from tt-train/tests/ops.
+# One fully qualified test name per line; blank lines and lines starting with '#' are ignored.
+# Usage (checks that every entry exists, then runs them):
+#   tt-train/tests/ops/run_smoke_tests.sh [extra gtest args]
+
+# Binary ops (autograd forward + backward)
+BinaryOpsBackwardTest.AddSameShape
+BinaryOpsBackwardTest.SubSameShape
+BinaryOpsBackwardTest.MulSameShape
+BinaryOpsBackwardTest.DivSameShape
+BinaryOpsBackwardTest.MinSameShape
+BinaryOpsBackwardTest.MaxSameShape
+
+# Unary ops
+UnaryOpsTest.GlobalMean
+UnaryOpsTest.LogSoftmax
+UnaryOpsTest.Exp
+UnaryOpsTest.Clip
+UnaryOpsTest.Gelu
+SiLUOpTest.SiLU_Compare_Small
+
+# Losses
+CrossEntropyForwardTest.CrossEntropyForward_Small_Forward
+CrossEntropyBackwardTest.CrossEntropyBackward_Small_Backward
+SelectTargetLogitTest.SmallFullVocab
+SubtractAtTargetTest.SmallFullVocab
+
+# Normalization
+RMSNormOpTest.RMSNorm_Compare_Basic_Small
+PolyNormOpTest.PolyNorm_Compare_BasicSmall
+LayerNormForwardOpTest.MetalLayerNormFw_OneTile
+LayerNormBackwardOpTest.MetalLayerNormBw_OneTile
+LayerNormOpTest.CompositeLayerNormOp_backward
+All/FrobeniusNormalizeTest.MatchesCpuReference/SingleTile
+
+# Attention and softmax
+SDPAForwardTest.SDPAForwardTest_CausalMask_SingleTile
+SDPABackwardTest.DiffVDim_SingleTile
+SoftmaxTest.SoftmaxTest_Large_Values
+SoftmaxBackward/SoftmaxBackwardOpTypedTest.SoftmaxBackward_LastDim_1Tile/bf16
+MLA_QRopeCacheTest.AutogradWrapperBackwardMatchesReference
+MLAKVAssembleTest.AutogradWrapperBackwardMatchesReference
+RoPETest.BackwardTest
+SplitHeadsTest.RoundTripsThroughHeadsFusion
+
+# Embedding and linear
+EmbeddingOpTest.EmbeddingForwardBackward
+PositionalEmbeddingTest.NonTrainableEmbedding
+LinearOpTest.TTNNLargeLinearOpWithBias
+
+# MLP and MoE
+SwiGLUBackwardTest.BackwardAccuracy_1x1x32x32
+MoeFfnSwigluForwardTest.Small_E2_H64_I128
+MoeGroupTest.BasicShape
+MoeUngroupTest.Basic
+VariableMatmulTest.MinimalParity_OnDeviceInputAndWeightK_TransposeA
+VariableMatmulTest.MinimalParity_OnDeviceInputAndOutputRow
+
+# Matmul, optimizer math, sampling, profiling
+KSplitGramMatmulTest.VerificationMirror
+NewtonSchulzOpTest.MuonCoeff
+GumbelSampleOpTest.TestSamplingGreedyMatchesArgmaxReference
+ProfilerNoOpTest.ProfilerNoOpTest_Batch
+
+# Multi-device ops (skipped unless running on a 1x2 mesh or Galaxy)
+Mesh1x2CommOpsTest.TestAllReduceFullyTiled
+Mesh1x2CommOpsTest.TestAllGatherFullyTiled
+Mesh1x2CommOpsTest.TestScatterFullyTiled
+ShardedCrossEntropyLossTest.BackwardSmall
+GalaxyRingShiftTest.ForwardWithGradient
+GalaxyRingSDPATest.WithCausalMaskBackward

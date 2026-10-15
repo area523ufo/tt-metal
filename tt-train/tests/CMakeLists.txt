@@ -36,9 +36,6 @@ set(SOURCES
     optimizers/sgd_test.cpp
     optimizers/adamw_test.cpp
     optimizers/muon_composite_test.cpp
-    ops/newton_schulz_op_test.cpp
-    ops/frobenius_normalize_test.cpp
-    ops/k_split_gram_matmul_op_test.cpp
     optimizers/adamw_full_precision_test.cpp
     optimizers/no_op_test.cpp
     modules/distributed/linear_test.cpp
@@ -47,6 +44,14 @@ set(SOURCES
     serialization/tensor_serializer_test.cpp
     serialization/safetensors_test.cpp
     serialization/get_value_type_test.cpp
+    utils/memory_utils_test.cpp
+    utils/training_utils_test.cpp
+)
+
+set(OPS_SOURCES
+    ops/newton_schulz_op_test.cpp
+    ops/frobenius_normalize_test.cpp
+    ops/k_split_gram_matmul_op_test.cpp
     ops/cross_entropy_fw_op_test.cpp
     ops/select_target_logit_op_test.cpp
     ops/subtract_at_target_op_test.cpp
@@ -82,10 +87,17 @@ set(SOURCES
     ops/mla_kv_assemble_op_test.cpp
     ops/multi_head_test.cpp
     ops/variable_matmul_test.cpp
-    utils/memory_utils_test.cpp
-    utils/training_utils_test.cpp
     ops/mla_q_rope_op_test.cpp
     ops/gumbel_sample_op_test.cpp
+)
+
+# Ops tests are compiled once and linked into both ttml_tests and the standalone ttml_ops_tests.
+add_library(ttml_ops_test_objs OBJECT ${OPS_SOURCES})
+target_link_libraries(
+    ttml_ops_test_objs
+    PUBLIC
+        GTest::gmock_main
+        ttml
 )
 
 add_executable(ttml_tests ${SOURCES})
@@ -93,19 +105,33 @@ target_link_libraries(
     ttml_tests
     GTest::gmock_main
     ttml
+    ttml_ops_test_objs
 )
+
+add_executable(ttml_ops_tests)
+target_link_libraries(ttml_ops_tests PRIVATE ttml_ops_test_objs)
 
 # Reuse the ttml precompiled header for test compilation.
 # Force -fPIC to match ttml's compile flags (executables default to -fPIE,
 # which is incompatible with library PCH in Clang).
+foreach(target ttml_ops_test_objs ttml_tests)
+    set_target_properties(
+        ${target}
+        PROPERTIES
+            POSITION_INDEPENDENT_CODE
+                TRUE
+    )
+    target_compile_options(${target} PRIVATE -fPIC)
+    tt_reuse_precompile_headers(${target} ttml_pch)
+endforeach()
+
 set_target_properties(
-    ttml_tests
+    ttml_ops_tests
     PROPERTIES
-        POSITION_INDEPENDENT_CODE
-            TRUE
+        INSTALL_RPATH
+            "$ORIGIN/../lib"
 )
-target_compile_options(ttml_tests PRIVATE -fPIC)
-tt_reuse_precompile_headers(ttml_tests ttml_pch)
+install(TARGETS ttml_ops_tests RUNTIME COMPONENT ttml-validation)
 
 # Suppress false-positive -Wnonnull from xtensor internals on GCC < 13.
 # At -O3, GCC over-inlines xbroadcast::has_linear_assign and wrongly flags std::equal as null.
