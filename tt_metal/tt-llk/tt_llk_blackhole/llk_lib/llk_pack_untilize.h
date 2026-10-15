@@ -606,7 +606,7 @@ inline void _llk_pack_untilize_init_sized_(
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b1111);
     const std::uint32_t call_bytes = rows_per_call * output_addr_offset;
     _llk_pack_untilize_run_init_(
-        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0,
+        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && !pace && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0,
         call_bytes,
         rows_per_call * (dense ? block_ct_dim / 2 : block_ct_dim));
 
@@ -769,7 +769,7 @@ inline void _llk_pack_untilize_init_(
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b1111);
     const std::uint32_t call_bytes = rows_per_call * output_addr_offset;
     _llk_pack_untilize_run_init_(
-        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0,
+        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && !pace && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0,
         call_bytes,
         rows_per_call * (dense ? block_ct_dim / 2 : block_ct_dim));
 
