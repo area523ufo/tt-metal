@@ -14,12 +14,6 @@ namespace atomic = hal::atomic;
 // Runtime fields are added to a constant operation word and pushed through the
 // instruction buffer. Out-of-range runtime fields branch to an LLK assertion.
 
-template <std::uint32_t AddressIndex>
-constexpr atomic::Counter<16, AddressIndex> counter16(const hal::Gpr<AddressIndex> address, const std::uint8_t word)
-{
-    return {address, word};
-}
-
 // ATINCGET 0x61: wrap 7 << 14 | word 1 << 12 | data 2 << 6 | address.
 extern "C" __attribute__((noinline, used)) void runtime_fetch_increment_descriptor(std::uint32_t address)
 {
@@ -43,7 +37,8 @@ extern "C" __attribute__((noinline, used)) void runtime_fetch_increment_descript
 // ATINCGET 0x61: wrap 15 << 14 | word << 12 | data 2 << 6 | address 1.
 extern "C" __attribute__((noinline, used)) void counter_runtime_word(std::uint8_t word)
 {
-    atomic::fetch_add(counter16(hal::gpr<1>(), word), hal::gpr<2>());
+    const auto counter = atomic::counter<16>(hal::gpr<1>(), word);
+    counter.fetch_add(hal::gpr<2>());
 }
 
 // CHECK-LABEL: <counter_runtime_word>:
@@ -63,11 +58,12 @@ extern "C" __attribute__((noinline, used)) void counter_runtime_word(std::uint8_
 // ATINCGETPTR 0x62: increment << 18 | wrap 9 << 14 | read | result 4 << 6 | address 3.
 extern "C" __attribute__((noinline, used)) void fifo_runtime_increment(std::uint8_t increment_log2)
 {
-    atomic::pop(atomic::fifo<8>(hal::gpr<3>()), hal::gpr<4>(), increment_log2);
+    constexpr auto fifo = atomic::fifo<8>(hal::gpr<3>());
+    TT_INSN(fifo.operation().pop(hal::gpr<4>(), increment_log2));
 }
 
 // CHECK-LABEL: <fifo_runtime_increment>:
-// CHECK-NEXT: li [[LIMIT:a[0-7]]],15
+// CHECK-NEXT: li [[LIMIT:a[0-7]]],8
 // CHECK-NEXT: bltu [[LIMIT]],a0,[[FAIL:[0-9a-f]+]]
 // CHECK: lui [[BASE:a[0-7]]],0x62024
 // CHECK-NEXT: addi [[OP:a[0-7]]],[[BASE]],259
@@ -83,7 +79,8 @@ extern "C" __attribute__((noinline, used)) void fifo_runtime_increment(std::uint
 // ATINCGETPTR 0x62: wrap 9 << 14 | write 1 << 12 | result 4 << 6 | address.
 extern "C" __attribute__((noinline, used)) void fifo_runtime_push_default(std::uint32_t address)
 {
-    atomic::push(atomic::fifo<8>(hal::gpr(address)), hal::gpr<4>());
+    const auto fifo = atomic::fifo<8>(hal::gpr(address));
+    fifo.push(hal::gpr<4>());
 }
 
 // CHECK-LABEL: <fifo_runtime_push_default>:
@@ -102,7 +99,8 @@ extern "C" __attribute__((noinline, used)) void fifo_runtime_push_default(std::u
 // ATINCGETPTR 0x62: no-increment 1 << 22 | wrap 9 << 14 | write 1 << 12 | result << 6 | address 3.
 extern "C" __attribute__((noinline, used)) void fifo_runtime_wait_full(std::uint32_t result)
 {
-    atomic::wait_while<atomic::FifoState::Full>(atomic::fifo<8>(hal::gpr<3>()), hal::gpr(result));
+    constexpr auto fifo = atomic::fifo<8>(hal::gpr<3>());
+    fifo.wait_while<atomic::FifoState::Full>(hal::gpr(result));
 }
 
 // CHECK-LABEL: <fifo_runtime_wait_full>:
@@ -124,8 +122,8 @@ extern "C" __attribute__((noinline, used)) void fifo_runtime_wait_full(std::uint
 extern "C" __attribute__((noinline, used)) void lock_runtime_acquire_release(std::uint32_t address)
 {
     const auto lock = atomic::Lock {hal::gpr(address), 1};
-    atomic::acquire(lock);
-    atomic::release(lock);
+    lock.acquire();
+    lock.release();
 }
 
 // CHECK-LABEL: <lock_runtime_acquire_release>:
@@ -146,7 +144,8 @@ extern "C" __attribute__((noinline, used)) void lock_runtime_acquire_release(std
 // ATCAS 0x64: set << 18 | compare << 14 | address 7, each value checked against four bits.
 extern "C" __attribute__((noinline, used)) void lock_runtime_compare_set(std::uint8_t compare, std::uint8_t set)
 {
-    atomic::compare_set(atomic::Lock {hal::gpr<7>()}, compare, set);
+    constexpr auto lock = atomic::Lock {hal::gpr<7>()};
+    lock.compare_set(compare, set);
 }
 
 // CHECK-LABEL: <lock_runtime_compare_set>:
@@ -203,30 +202,61 @@ extern "C" __attribute__((noinline, used)) void fifo_runtime_capacity(std::uint8
 // Both value-selected helpers must assert before issuing a capacity-15 update.
 extern "C" __attribute__((noinline, used)) void fifo_capacity15_updates()
 {
-    const auto fifo = atomic::fifo<15>(hal::gpr<3>());
-    atomic::pop(fifo, hal::gpr<4>());
-    atomic::push(fifo, hal::gpr<4>());
+    constexpr auto fifo = atomic::fifo<15>(hal::gpr<3>());
+    fifo.pop(hal::gpr<4>());
+    fifo.push(hal::gpr<4>());
 }
 
 // CHECK-LABEL: <fifo_capacity15_updates>:
 // CHECK: ebreak
-// CHECK: sw
+// CHECK: ttatincgetptr
 // CHECK: ebreak
-// CHECK: sw
+// CHECK: ttatincgetptr
 // CHECK-NEXT: ret
 
 // The same capacity remains supported for read and write readiness probes.
 extern "C" __attribute__((noinline, used)) void fifo_capacity15_waits()
 {
-    const auto fifo = atomic::fifo<15>(hal::gpr<3>());
-    atomic::wait_while<atomic::FifoState::Empty>(fifo, hal::gpr<4>());
-    atomic::wait_while<atomic::FifoState::Full>(fifo, hal::gpr<4>());
+    constexpr auto fifo = atomic::fifo<15>(hal::gpr<3>());
+    fifo.wait_while<atomic::FifoState::Empty>(hal::gpr<4>());
+    fifo.wait_while<atomic::FifoState::Full>(hal::gpr<4>());
 }
 
 // CHECK-LABEL: <fifo_capacity15_waits>:
 // CHECK-NOT: ebreak
-// CHECK: sw
+// CHECK: ttatincgetptr
 // CHECK-NOT: ebreak
-// CHECK: sw
+// CHECK: ttatincgetptr
 // CHECK-NOT: ebreak
+// CHECK: ret
+
+// Static-looking values on the object execution path retain assertion-controlled
+// validation; no new type-level rejection is required for these invalid operands.
+extern "C" __attribute__((noinline, used)) void invalid_static_counter()
+{
+    constexpr auto counter = atomic::counter<0>(hal::gpr<1>());
+    counter.fetch_add(hal::gpr<2>());
+}
+
+// CHECK-LABEL: <invalid_static_counter>:
+// CHECK: ebreak
+// CHECK: ret
+
+extern "C" __attribute__((noinline, used)) void invalid_static_address()
+{
+    constexpr auto counter = atomic::counter<32>(hal::gpr<64>());
+    counter.fetch_add(hal::gpr<2>());
+}
+
+// CHECK-LABEL: <invalid_static_address>:
+// CHECK: ebreak
+// CHECK: ret
+
+extern "C" __attribute__((noinline, used)) void invalid_static_quad()
+{
+    atomic::store_masked(hal::gpr<3>(), hal::gpr<5>(), 0xff);
+}
+
+// CHECK-LABEL: <invalid_static_quad>:
+// CHECK: ebreak
 // CHECK: ret
