@@ -334,7 +334,8 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     constexpr bool face_passes      = block_ct_dim == FAST_UNTILIZE_MAX_PASS_UNIT_DIM;
     constexpr bool whole_row_blocks = full_ct_dim <= block_ct_dim;
     const std::uint32_t block_bytes = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM) * (face_passes ? FAST_UNTILIZE_PHASE_ROWS : TILE_R_DIM);
-    _llk_pack_untilize_run_init_((whole_row_blocks && (block_bytes % 16 == 0)) ? block_bytes / 16 : 0, block_bytes);
+    constexpr std::uint32_t pacrs_per_block = (face_passes ? 1 : 2) * FAST_UNTILIZE_PHASE_ROWS * ((full_ct_dim + 1) / 2);
+    _llk_pack_untilize_run_init_((whole_row_blocks && (block_bytes % 16 == 0)) ? block_bytes / 16 : 0, block_bytes, pacrs_per_block);
 }
 
 template <std::uint32_t phase_offset>

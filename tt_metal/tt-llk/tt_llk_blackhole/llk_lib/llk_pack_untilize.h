@@ -59,13 +59,15 @@ inline std::uint32_t untilize_run_limit  = 0;
 } // namespace ckernel::packer
 
 // step_16B: L1 size of one block, 0 to program every block. reach_bytes: channel 1 offset a block adds after its start.
-inline void _llk_pack_untilize_run_init_(const std::uint32_t step_16B, const std::uint32_t reach_bytes)
+// A block of fewer than 96 PACRs programs its destination: there the run bookkeeping costs the RISC more than the five
+// Tensix instructions it saves.
+inline void _llk_pack_untilize_run_init_(const std::uint32_t step_16B, const std::uint32_t reach_bytes, const std::uint32_t pacrs_per_block)
 {
     constexpr std::uint32_t window_bytes = 256 * 1024;
     const std::uint32_t step_bytes       = step_16B * 16;
     const bool usable                    = (step_16B != 0) && (step_bytes <= 0xFFFF) && (step_bytes + reach_bytes < window_bytes);
     const std::uint32_t blocks           = usable ? (window_bytes - reach_bytes - 1) / step_bytes + 1 : 1;
-    ckernel::packer::untilize_run_step   = step_16B;
+    ckernel::packer::untilize_run_step   = (pacrs_per_block >= 96) ? step_16B : 0;
     ckernel::packer::untilize_run_limit  = (blocks > 0xFF) ? 0xFF : blocks;
     ckernel::packer::untilize_run_base   = 0xFFFFFFFF;
     ckernel::packer::untilize_run_last   = 0xFFFFFFFF;
@@ -604,7 +606,9 @@ inline void _llk_pack_untilize_init_sized_(
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b1111);
     const std::uint32_t call_bytes = rows_per_call * output_addr_offset;
     _llk_pack_untilize_run_init_(
-        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0, call_bytes);
+        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0,
+        call_bytes,
+        rows_per_call * (dense ? block_ct_dim / 2 : block_ct_dim));
 
     // Always include setup calls for safety (as recommended by maintainer)
     // Program packer to pack out the correct number of datums per row
@@ -765,7 +769,9 @@ inline void _llk_pack_untilize_init_(
     TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b1111);
     const std::uint32_t call_bytes = rows_per_call * output_addr_offset;
     _llk_pack_untilize_run_init_(
-        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0, call_bytes);
+        (!narrow_row && l1_rows_contiguous && !l1_row_step_by_cfg && (call_bytes % 16 == 0)) ? call_bytes / 16 : 0,
+        call_bytes,
+        rows_per_call * (dense ? block_ct_dim / 2 : block_ct_dim));
 
     // Always include setup calls for safety (as recommended by maintainer)
     // Program packer to pack out the correct number of datums per row
