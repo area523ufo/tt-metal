@@ -58,6 +58,7 @@
 //       ./build/test/ttnn/multiprocess/unit_tests_cross_process_d2d
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -89,6 +90,7 @@
 #include <ttnn/api/ttnn/distributed/distributed_configs.hpp>
 #include "ttnn/distributed/distributed_tensor.hpp"
 #include "ttnn/global_semaphore.hpp"
+#include "ttnn/tensor/d2d_pipeline_descriptor.hpp"
 #include "ttnn/tensor/d2d_stream_service.hpp"
 #include "ttnn/services/h2d_socket_service.hpp"
 #include "ttnn/services/d2h_socket_service.hpp"
@@ -1267,6 +1269,76 @@ TEST_F(CrossProcessD2DFixture, ForwardChainStress) {
         ++case_idx;
         run_forward_chain_stress(mesh_device_, combo.global_shape, combo.worker_cores, combo.num_iters);
     }
+}
+
+// Every rank exports its endpoints; rank 0 gets the whole chain, with each sender's coords
+// pointing at the next rank's receiver.
+TEST_F(CrossProcessD2DFixture, ExportPipelineDescriptor) {
+    using ttnn::D2DEndpointRole;
+    const auto& ctx = DistributedContext::get_current_world();
+    const int world_size = *ctx->size();
+    const int rank = *ctx->rank();
+    if (world_size < 2) {
+        GTEST_SKIP() << "Pipeline export needs >= 2 ranks; got " << world_size;
+    }
+
+    constexpr uint32_t kMetadataBytes = 16;
+    constexpr uint32_t kNumGates = 2;
+    const ttnn::Shape global_shape({1, 1, 32, 64});
+    std::unique_ptr<D2DStreamServiceReceiver> inbound;
+    std::unique_ptr<D2DStreamServiceSender> outbound;
+    if (rank > 0) {
+        auto cfg = make_cfg(mesh_device_, global_shape, kWorkerCores, kMetadataBytes);
+        cfg.stage_gate =
+            ttnn::D2DStageGateConfig{.num_gates = kNumGates, .slot_id_offset_bytes = 0, .gate_flags_offset_bytes = 4};
+        inbound = D2DStreamService::create_receiver(
+            mesh_device_,
+            std::move(cfg),
+            D2DEndpointConfig{.sender_rank = Rank{rank - 1}, .receiver_rank = Rank{rank}, .distributed_context = ctx});
+    }
+    if (rank + 1 < world_size) {
+        outbound = D2DStreamService::create_sender(
+            mesh_device_,
+            make_cfg(mesh_device_, global_shape, kWorkerCores, kMetadataBytes),
+            D2DEndpointConfig{.sender_rank = Rank{rank}, .receiver_rank = Rank{rank + 1}, .distributed_context = ctx});
+    }
+
+    const auto path = D2DStreamService::export_pipeline_descriptor(
+        "gtest_cross_process_export", inbound.get(), outbound.get(), Rank{0}, ctx);
+    EXPECT_EQ(path.has_value(), rank == 0);
+    if (rank == 0) {
+        const auto desc = ttnn::D2DPipelineDescriptor::wait_and_read(*path);
+        std::filesystem::remove(*path);
+        ASSERT_EQ(desc.ranks.size(), static_cast<size_t>(world_size));
+        for (int r = 0; r < world_size; ++r) {
+            const auto& rd = desc.ranks[r];
+            EXPECT_EQ(rd.rank, r);
+            EXPECT_FALSE(rd.host_name.empty());
+            ASSERT_EQ(rd.endpoints.size(), static_cast<size_t>((r > 0) + (r + 1 < world_size)));
+            for (const auto& ep : rd.endpoints) {
+                const bool is_receiver = ep.role == D2DEndpointRole::Receiver;
+                EXPECT_EQ(ep.peer_rank, is_receiver ? r - 1 : r + 1);
+                EXPECT_EQ(ep.metadata_size_bytes, kMetadataBytes);
+                EXPECT_EQ(ep.num_stage_gates, is_receiver ? kNumGates : 0u);
+                ASSERT_FALSE(ep.coords.empty());
+                for (const auto& c : ep.coords) {
+                    EXPECT_NE(c.backing_tensor_addr, 0u);
+                    EXPECT_EQ(c.stage_gate_base_addr != 0, is_receiver);
+                }
+            }
+        }
+        // Inbound is listed before outbound.
+        for (int r = 0; r + 1 < world_size; ++r) {
+            const auto& snd = desc.ranks[r].endpoints.back();
+            const auto& rcv = desc.ranks[r + 1].endpoints.front();
+            ASSERT_EQ(snd.coords.size(), rcv.coords.size());
+            for (size_t i = 0; i < snd.coords.size(); ++i) {
+                EXPECT_EQ(snd.coords[i].peer_fabric_node_id, rcv.coords[i].fabric_node_id);
+                EXPECT_EQ(rcv.coords[i].peer_fabric_node_id, snd.coords[i].fabric_node_id);
+            }
+        }
+    }
+    ctx->barrier();
 }
 
 }  // namespace

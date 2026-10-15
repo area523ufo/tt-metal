@@ -215,6 +215,12 @@ from ttnn._ttnn.d2d_stream_service import (
     D2DStreamServiceReceiver,
     D2DStageGateConfig,
     D2DStageGateDescriptor,
+    D2DEndpointRole,
+    D2DEndpointCoordDescriptor,
+    D2DEndpointDescriptor,
+    D2DRankDescriptor,
+    D2DPipelineDescriptor,
+    d2d_pipeline_descriptor_path,
     STAGE_GATE_FLAG_CLOSE_ON_TRANSIT,
     STAGE_GATE_FLAG_BYPASS,
 )

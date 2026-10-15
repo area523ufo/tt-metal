@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 
 #include <tt-metalium/buffer_types.hpp>
@@ -20,6 +21,7 @@
 #include <tt-metalium/mesh_coord.hpp>
 
 #include "ttnn/distributed/distributed_tensor.hpp"
+#include "ttnn/tensor/d2d_pipeline_descriptor.hpp"
 #include "ttnn/tensor/d2d_stage_gate.hpp"
 #include "ttnn/tensor/tensor.hpp"
 
@@ -218,6 +220,9 @@ public:
     void wait_for_fabric_links();
     void release_fabric_links();
 
+    // This endpoint's entry in a D2DPipelineDescriptor.
+    D2DEndpointDescriptor describe() const;
+
 private:
     friend class D2DStreamService;
 
@@ -287,6 +292,9 @@ public:
     void set_stage_gate(const tt::tt_metal::distributed::MeshCoordinate& coord, uint32_t gate, bool open);
     bool is_stage_gate_open(const tt::tt_metal::distributed::MeshCoordinate& coord, uint32_t gate) const;
 
+    // This endpoint's entry in a D2DPipelineDescriptor.
+    D2DEndpointDescriptor describe() const;
+
 private:
     friend class D2DStreamService;
 
@@ -344,6 +352,16 @@ public:
         const std::shared_ptr<tt::tt_metal::distributed::MeshDevice>& receiver_mesh,
         D2DStreamConfig cfg,
         const D2DEndpointConfig& endpoints);
+
+    // Collective over `ctx` (default: world): every rank calls it with its own endpoints
+    // (either may be null). `root` gathers every rank's endpoints and writes them to
+    // d2d_pipeline_descriptor_path(service_id). Returns that path on `root`, nullopt elsewhere.
+    static std::optional<std::string> export_pipeline_descriptor(
+        const std::string& service_id,
+        const D2DStreamServiceReceiver* inbound,
+        const D2DStreamServiceSender* outbound,
+        tt::tt_metal::distributed::multihost::Rank root = tt::tt_metal::distributed::multihost::Rank{0},
+        std::shared_ptr<tt::tt_metal::distributed::multihost::DistributedContext> ctx = nullptr);
 
 private:
     // Shared per-side tail of all three factories. Given an already-constructed

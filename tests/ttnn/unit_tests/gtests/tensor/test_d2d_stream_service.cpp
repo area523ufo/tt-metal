@@ -30,14 +30,18 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <future>
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <string>
 #include <thread>
 #include <tuple>
 #include <vector>
+
+#include <unistd.h>
 
 #include "gtest/gtest.h"
 
@@ -62,6 +66,7 @@
 #include "tt_metal/tt_metal/common/multi_device_fixture.hpp"
 
 #include "ttnn/distributed/distributed_tensor.hpp"
+#include "ttnn/tensor/d2d_pipeline_descriptor.hpp"
 #include "ttnn/tensor/d2d_stream_service.hpp"
 #include "ttnn/services/h2d_socket_service.hpp"
 #include "ttnn/tensor/storage.hpp"
@@ -2212,6 +2217,101 @@ TEST_F(D2DStreamServiceTest, StageGateLeaseModeSingleChipPair) {
 TEST_F(D2DStreamServiceTest, StageGateLeaseModeRowPair) {
     D2D_ROW_PAIR_GUARD();
     verify_stage_gate_lease_mode(sender_mesh, receiver_mesh);
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline descriptor
+// ---------------------------------------------------------------------------
+
+TEST(D2DPipelineDescriptorTest, RoundTrip) {
+    using ttnn::D2DEndpointRole;
+    ttnn::D2DPipelineDescriptor desc;
+    for (int r = 0; r < 2; ++r) {
+        ttnn::D2DRankDescriptor rank{.rank = r, .host_name = "host" + std::to_string(r)};
+        rank.endpoints.push_back(ttnn::D2DEndpointDescriptor{
+            .role = r == 0 ? D2DEndpointRole::Sender : D2DEndpointRole::Receiver,
+            .peer_rank = 1 - r,
+            .metadata_size_bytes = 20,
+            .num_stage_gates = r == 0 ? 0u : 4u,
+            .stage_gate_slot_offset_bytes = 0,
+            .stage_gate_flags_offset_bytes = r == 0 ? 0u : 16u,
+            .coords = {ttnn::D2DEndpointCoordDescriptor{
+                .coord = MeshCoordinate(0, static_cast<uint32_t>(r)),
+                .fabric_node_id = tt::tt_fabric::FabricNodeId(tt::tt_fabric::MeshId{static_cast<uint32_t>(r)}, 3),
+                .peer_fabric_node_id =
+                    tt::tt_fabric::FabricNodeId(tt::tt_fabric::MeshId{static_cast<uint32_t>(1 - r)}, 3),
+                .pcie_device_id = 7,
+                .service_core_noc = CoreCoord(18, 19),
+                .backing_tensor_addr = 0x1'0000'0040ull,
+                .stage_gate_base_addr = r == 0 ? 0u : 0x2000u}}});
+        desc.ranks.push_back(std::move(rank));
+    }
+    EXPECT_EQ(ttnn::D2DPipelineDescriptor::deserialize(desc.serialize()), desc);
+
+    const auto path = ttnn::d2d_pipeline_descriptor_path("gtest_round_trip_" + std::to_string(getpid()));
+    desc.write_to_file(path);
+    EXPECT_EQ(ttnn::D2DPipelineDescriptor::wait_and_read(path), desc);
+    std::filesystem::remove(path);
+    EXPECT_ANY_THROW((void)ttnn::D2DPipelineDescriptor::wait_and_read(path, /*timeout_ms=*/10));
+}
+
+// describe() reports the handle's own addresses, and a single-rank export round-trips through the file.
+void verify_pipeline_descriptor_export(
+    const std::shared_ptr<MeshDevice>& sender_mesh, const std::shared_ptr<MeshDevice>& receiver_mesh) {
+    using ttnn::D2DEndpointRole;
+    auto [sender, receiver] =
+        D2DStreamService::create_pair(sender_mesh, receiver_mesh, make_stage_gate_config(sender_mesh));
+    const auto rd = receiver->describe();
+    const auto sd = sender->describe();
+    EXPECT_EQ(rd.role, D2DEndpointRole::Receiver);
+    EXPECT_EQ(sd.role, D2DEndpointRole::Sender);
+    EXPECT_EQ(rd.metadata_size_bytes, kGateMetadataBytes);
+    EXPECT_EQ(sd.metadata_size_bytes, kGateMetadataBytes);
+    EXPECT_EQ(rd.num_stage_gates, kGateNumGates);
+    EXPECT_EQ(rd.stage_gate_slot_offset_bytes, kGateSlotOffsetBytes);
+    EXPECT_EQ(rd.stage_gate_flags_offset_bytes, kGateFlagsOffsetBytes);
+    EXPECT_EQ(sd.num_stage_gates, 0u);
+    ASSERT_EQ(rd.coords.size(), sd.coords.size());
+    for (size_t i = 0; i < rd.coords.size(); ++i) {
+        const auto& rc = rd.coords[i];
+        const auto& sc = sd.coords[i];
+        EXPECT_EQ(rc.coord, sc.coord);
+        EXPECT_EQ(rc.fabric_node_id, receiver_mesh->get_fabric_node_id(rc.coord));
+        EXPECT_EQ(sc.fabric_node_id, sender_mesh->get_fabric_node_id(sc.coord));
+        EXPECT_EQ(rc.peer_fabric_node_id, sc.fabric_node_id);
+        EXPECT_EQ(sc.peer_fabric_node_id, rc.fabric_node_id);
+        EXPECT_NE(rc.pcie_device_id, UINT32_MAX);
+        const auto gate = receiver->get_stage_gate_descriptor(rc.coord);
+        EXPECT_EQ(rc.stage_gate_base_addr, gate.gate_base_addr);
+        EXPECT_EQ(rc.service_core_noc, gate.service_core_noc);
+        EXPECT_EQ(sc.stage_gate_base_addr, 0u);
+        EXPECT_EQ(
+            rc.backing_tensor_addr,
+            receiver->get_backing_tensor().mesh_buffer().get_device_buffer(rc.coord)->address());
+        EXPECT_EQ(
+            sc.backing_tensor_addr, sender->get_backing_tensor().mesh_buffer().get_device_buffer(sc.coord)->address());
+    }
+
+    const auto path = D2DStreamService::export_pipeline_descriptor(
+        "gtest_export_" + std::to_string(getpid()), receiver.get(), sender.get());
+    ASSERT_TRUE(path.has_value());
+    const auto desc = ttnn::D2DPipelineDescriptor::wait_and_read(*path);
+    std::filesystem::remove(*path);
+    ASSERT_EQ(desc.ranks.size(), 1u);
+    EXPECT_FALSE(desc.ranks[0].host_name.empty());
+    ASSERT_EQ(desc.ranks[0].endpoints.size(), 2u);
+    EXPECT_EQ(desc.ranks[0].endpoints[0], rd);
+    EXPECT_EQ(desc.ranks[0].endpoints[1], sd);
+}
+
+TEST_F(D2DStreamServiceTest, PipelineDescriptorExportSingleChipPair) {
+    D2D_SINGLE_CHIP_PAIR_GUARD();
+    verify_pipeline_descriptor_export(sender_mesh, receiver_mesh);
+}
+
+TEST_F(D2DStreamServiceTest, PipelineDescriptorExportRowPair) {
+    D2D_ROW_PAIR_GUARD();
+    verify_pipeline_descriptor_export(sender_mesh, receiver_mesh);
 }
 
 }  // namespace

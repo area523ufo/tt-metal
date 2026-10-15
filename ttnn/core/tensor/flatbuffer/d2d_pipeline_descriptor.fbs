@@ -1,0 +1,42 @@
+namespace ttnn.d2d_flatbuffer;
+
+enum D2DEndpointRole : ubyte {
+  Sender = 0,
+  Receiver = 1
+}
+
+table D2DEndpointCoord {
+  coord: [uint32];
+  mesh_id: uint32;
+  chip_id: uint32;
+  peer_mesh_id: uint32;
+  peer_chip_id: uint32;
+  pcie_device_id: uint32;
+  service_core_noc_x: uint32;
+  service_core_noc_y: uint32;
+  backing_tensor_addr: uint64;
+  stage_gate_base_addr: uint64;
+}
+
+table D2DEndpoint {
+  role: D2DEndpointRole;
+  peer_rank: int32;
+  metadata_size_bytes: uint32;
+  num_stage_gates: uint32;
+  stage_gate_slot_offset_bytes: uint32;
+  stage_gate_flags_offset_bytes: uint32;
+  coords: [D2DEndpointCoord];
+}
+
+table D2DRank {
+  rank: int32;
+  host_name: string;
+  endpoints: [D2DEndpoint];
+}
+
+table D2DPipelineDescriptor {
+  version: uint32;
+  ranks: [D2DRank];
+}
+
+root_type D2DPipelineDescriptor;

@@ -12,6 +12,8 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 #include <nanobind/stl/unique_ptr.h>
 
 #include <tt-metalium/buffer_types.hpp>
@@ -22,6 +24,7 @@
 #include <tt-metalium/mesh_device.hpp>
 
 #include "ttnn/distributed/distributed_tensor.hpp"
+#include "ttnn/tensor/d2d_pipeline_descriptor.hpp"
 #include "ttnn/tensor/d2d_stream_service.hpp"
 #include "ttnn/tensor/tensor.hpp"
 
@@ -32,6 +35,11 @@ namespace {
 using tt::tt_metal::distributed::SocketMemoryConfig;
 using tt::tt_metal::distributed::multihost::Rank;
 using ttnn::D2DEndpointConfig;
+using ttnn::D2DEndpointCoordDescriptor;
+using ttnn::D2DEndpointDescriptor;
+using ttnn::D2DEndpointRole;
+using ttnn::D2DPipelineDescriptor;
+using ttnn::D2DRankDescriptor;
 using ttnn::D2DStageGateConfig;
 using ttnn::D2DStageGateDescriptor;
 using ttnn::D2DStreamConfig;
@@ -94,6 +102,51 @@ void py_module_types(nb::module_& mod) {
         .def_ro("service_core_noc", &D2DStageGateDescriptor::service_core_noc)
         .def_ro("gate_base_addr", &D2DStageGateDescriptor::gate_base_addr);
 
+    nb::enum_<D2DEndpointRole>(mod, "D2DEndpointRole")
+        .value("Sender", D2DEndpointRole::Sender)
+        .value("Receiver", D2DEndpointRole::Receiver);
+
+    nb::class_<D2DEndpointCoordDescriptor>(mod, "D2DEndpointCoordDescriptor")
+        .def_ro("coord", &D2DEndpointCoordDescriptor::coord)
+        .def_ro("fabric_node_id", &D2DEndpointCoordDescriptor::fabric_node_id)
+        .def_ro("peer_fabric_node_id", &D2DEndpointCoordDescriptor::peer_fabric_node_id)
+        .def_ro("pcie_device_id", &D2DEndpointCoordDescriptor::pcie_device_id)
+        .def_ro("service_core_noc", &D2DEndpointCoordDescriptor::service_core_noc)
+        .def_ro("backing_tensor_addr", &D2DEndpointCoordDescriptor::backing_tensor_addr)
+        .def_ro("stage_gate_base_addr", &D2DEndpointCoordDescriptor::stage_gate_base_addr);
+
+    nb::class_<D2DEndpointDescriptor>(mod, "D2DEndpointDescriptor")
+        .def_ro("role", &D2DEndpointDescriptor::role)
+        .def_ro("peer_rank", &D2DEndpointDescriptor::peer_rank)
+        .def_ro("metadata_size_bytes", &D2DEndpointDescriptor::metadata_size_bytes)
+        .def_ro("num_stage_gates", &D2DEndpointDescriptor::num_stage_gates)
+        .def_ro("stage_gate_slot_offset_bytes", &D2DEndpointDescriptor::stage_gate_slot_offset_bytes)
+        .def_ro("stage_gate_flags_offset_bytes", &D2DEndpointDescriptor::stage_gate_flags_offset_bytes)
+        .def_ro("coords", &D2DEndpointDescriptor::coords);
+
+    nb::class_<D2DRankDescriptor>(mod, "D2DRankDescriptor")
+        .def_ro("rank", &D2DRankDescriptor::rank)
+        .def_ro("host_name", &D2DRankDescriptor::host_name)
+        .def_ro("endpoints", &D2DRankDescriptor::endpoints);
+
+    nb::class_<D2DPipelineDescriptor>(mod, "D2DPipelineDescriptor", R"doc(
+        Every D2DStreamService endpoint of a pipeline, as written by
+        D2DStreamService.export_pipeline_descriptor.
+    )doc")
+        .def_ro("ranks", &D2DPipelineDescriptor::ranks)
+        .def_static(
+            "wait_and_read",
+            &D2DPipelineDescriptor::wait_and_read,
+            nb::arg("path"),
+            nb::arg("timeout_ms") = 10000u,
+            "Wait for a descriptor file to appear, then read it.");
+
+    mod.def(
+        "d2d_pipeline_descriptor_path",
+        &ttnn::d2d_pipeline_descriptor_path,
+        nb::arg("service_id"),
+        "Path export_pipeline_descriptor writes for `service_id`.");
+
     // ----- Sender handle (created only via D2DStreamService factories) -----
     nb::class_<D2DStreamServiceSender>(mod, "D2DStreamServiceSender")
         .def(
@@ -155,7 +208,8 @@ void py_module_types(nb::module_& mod) {
             R"doc(
                 Grant the sender service one transfer over its fabric link(s). The service
                 forwards when it also sees data_ready, then releases the link back.
-            )doc");
+            )doc")
+        .def("describe", &D2DStreamServiceSender::describe, "This endpoint's entry in a D2DPipelineDescriptor.");
 
     // ----- Receiver handle (created only via D2DStreamService factories) -----
     nb::class_<D2DStreamServiceReceiver>(mod, "D2DStreamServiceReceiver")
@@ -232,7 +286,8 @@ void py_module_types(nb::module_& mod) {
             &D2DStreamServiceReceiver::is_stage_gate_open,
             nb::arg("coord"),
             nb::arg("gate"),
-            "Host read of one gate.");
+            "Host read of one gate.")
+        .def("describe", &D2DStreamServiceReceiver::describe, "This endpoint's entry in a D2DPipelineDescriptor.");
 
     // ----- Factory (static methods only; not instantiable) -----
     nb::class_<D2DStreamService>(mod, "D2DStreamService")
@@ -383,6 +438,23 @@ void py_module_types(nb::module_& mod) {
 
                 Returns:
                     D2DStreamServiceReceiver
+            )doc")
+        .def_static(
+            "export_pipeline_descriptor",
+            [](const std::string& service_id,
+               const D2DStreamServiceReceiver* inbound,
+               const D2DStreamServiceSender* outbound,
+               int root) {
+                return D2DStreamService::export_pipeline_descriptor(service_id, inbound, outbound, Rank{root});
+            },
+            nb::arg("service_id"),
+            nb::arg("inbound").none(),
+            nb::arg("outbound").none(),
+            nb::arg("root") = 0,
+            R"doc(
+                Collective over the current distributed world: every rank calls it with its own
+                endpoints (either may be None). `root` gathers them and writes
+                d2d_pipeline_descriptor_path(service_id). Returns the path on `root`, None elsewhere.
             )doc");
 }
 
