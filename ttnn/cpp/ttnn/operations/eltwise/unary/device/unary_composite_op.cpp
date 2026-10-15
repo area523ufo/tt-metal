@@ -37,7 +37,7 @@ Tensor _variance_impl(
     const std::optional<MemoryConfig>& output_mem_config) {
     ttsl::SmallVector<int> dims = {2, 3};
     constexpr float correction = 0.0f;
-    auto shape_wh = y.padded_shape();
+    auto shape_wh = y.logical_shape();
     float scale = 1.0f / ((float)(shape_wh[3] * shape_wh[2]) - correction);
     Tensor sqr_y_minus_mean_y = ttnn::square(y_minus_mean_y, output_mem_config);
     return ttnn::sum(sqr_y_minus_mean_y, dims, true, std::nullopt, std::nullopt, scale);
@@ -85,20 +85,20 @@ std::vector<Tensor> split_tensor_for_glu(
 using HWFunctionT = std::function<Tensor(const Tensor& y, const std::optional<MemoryConfig>&)>;
 Tensor _make_global_from_hw_impl(
     const HWFunctionT& fn, const Tensor& y, const std::optional<MemoryConfig>& output_mem_config) {
-    TT_FATAL(y.padded_shape().rank() == 4, "Cannot support non-rank 4 Tensor");
+    TT_FATAL(y.logical_shape().rank() == 4, "Cannot support non-rank 4 Tensor");
+    const auto& lshape = y.logical_shape();
 
-    // format to HW
-    Tensor y_hw = ttnn::reshape_on_device(
-        y, ttnn::Shape{1, 1, y.padded_shape()[2], y.padded_shape()[3] * y.padded_shape()[1] * y.padded_shape()[0]});
+    // format to HW preserving logical element count
+    Tensor y_hw = ttnn::reshape(
+        y, ttnn::Shape{1, 1, lshape[2], lshape[3] * lshape[1] * lshape[0]});
 
     // compute @fn
     Tensor z_0 = fn(y_hw, output_mem_config);
-    TT_FATAL(y_hw.padded_shape() == z_0.padded_shape(), "shape match");
+    TT_FATAL(y_hw.logical_shape() == z_0.logical_shape(), "shape match");
     y_hw.deallocate();
 
-    // reformat
-    Tensor z_1 = ttnn::reshape_on_device(
-        z_0, ttnn::Shape{y.padded_shape()[0], y.padded_shape()[1], y.padded_shape()[2], y.padded_shape()[3]});
+    // reformat back to original logical shape
+    Tensor z_1 = ttnn::reshape(z_0, lshape);
     z_0.deallocate();
 
     return z_1;
