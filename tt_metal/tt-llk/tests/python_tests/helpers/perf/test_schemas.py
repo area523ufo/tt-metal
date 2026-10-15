@@ -786,7 +786,7 @@ PERF_TEST_SCHEMAS = {
         },
     },
     "perf_unpack_tilize": {
-        "version": 5,
+        "version": 4,
         "columns": [
             "block_ct_dim",
             "block_rt_dim",
@@ -803,7 +803,6 @@ PERF_TEST_SCHEMAS = {
             "loop_factor",
             "marker",
             "tile_cnt",
-            "unpack_block",
             "unpack_to_dest",
         ],
         "aliases": {"formats.sfpu_math": "formats.sfpu_src"},
