@@ -10,7 +10,7 @@
  * read; this header adds the fences the measurement contract requires.
  *
  * Two hazards these brackets avoid, both mentioned in
- * x280/CHARACTERIZATION_UBENCH_DESIGN.md §Kernel entry point and §Timed loop:
+ * docs/benchmarks/design.md §Kernel entry point and §Timed loop:
  *
  *   - The compiler is free to hoist code out of, or sink code into, a
  *     measurement window if nothing anchors the boundary. `fence io, io`
@@ -102,7 +102,7 @@ typedef struct {
 } x280_paired_t;
 
 /* Reads a paired bracket end, wall then CPU: the one order of every X280
- * paired bracket (x280/MEASUREMENT.md "Paired reads"). The packet_injection
+ * paired bracket (docs/measurement.md "Paired reads"). The packet_injection
  * aggregate, which nests its reads, reads them by hand. */
 static inline __attribute__((always_inline)) x280_paired_t x280_paired_now(void) {
     x280_paired_t t;

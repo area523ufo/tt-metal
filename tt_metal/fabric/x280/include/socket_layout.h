@@ -145,7 +145,7 @@
  *
  * UNITS NOTE: every *_CYCLES_* mailbox below holds CLINT mtime ticks
  * at 50 MHz, not rdcycle ticks at PLL frequency. rdcycle does not advance
- * during CPU stalls (MEASUREMENT.md
+ * during CPU stalls (docs/measurement.md
  * "Unconfirmed hardware assumptions", item 5). Host readers
  * divide by 50_000_000 to get seconds. The *_CYCLES_* names are fixed
  * wire identifiers despite carrying mtime ticks.
