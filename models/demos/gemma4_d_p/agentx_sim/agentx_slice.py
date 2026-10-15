@@ -6,8 +6,7 @@
 comparison with the measured run.
 
     agentx_slice.py build   --traces .../256k/traces.jsonl --out slice.json [--window 120 --start 600 --concurrency 48]
-    agentx_slice.py predict --slice slice.json
-    agentx_slice.py compare --slice slice.json --measured replay_results.json
+    agentx_slice.py predict --slice slice.json [--measured replay_results.json]
 
 build: runs the closed-loop AgentX simulation (agentx_sim.run, 8k unbatched, infinite cache) and keeps the requests
 sent inside [start, start + window): arrival (relative), input length and cached prefix. The replay then plays these
@@ -19,8 +18,8 @@ predict: the batching demo scheduler's policy (demo/batching_server.py), priced 
 - serial 8k / 4k / 2k: FCFS, one request at a time, one chunk per step, the last chunk padded;
 - batched: FCFS admission into num_slots KV slots; each active request gets one 2k lane per step, the spare lanes go
   to active requests in order (up to their remaining chunks - 1), and the active list rotates by one every step.
-Step time = Model.step (pessimistic attention) + a host overhead per step (--host-ms, default 0: device time only).
---calibrated applies the silicon-measured device scale and host time per mode (Model.calibration).
+Step time = Model.step_s (calibrated on silicon per mode), plus the scheduler's gap between steps, which advances the
+clock but, as in the replay's busy_s, is not busy time.
 """
 
 import argparse
@@ -51,8 +50,9 @@ def build(a):
         max_think_s=a.max_think_s,
         decode_tps=a.decode_tps,
         seed=a.seed,
+        calibrated=False,  # the arrivals of the slices replayed so far
     )
-    window = sorted((s, n_in, cached) for s, _, n_in, cached, *_ in res["_stats"] if a.start <= s < a.start + a.window)
+    window = sorted((x.send, x.n_in, x.cached) for x in res["_stats"] if a.start <= x.send < a.start + a.window)
     reqs = [{"t": round(s - a.start, 4), "in": n_in, "cached": cached} for s, n_in, cached in window]
     json.dump(
         {
@@ -80,9 +80,9 @@ def start_of(r, width):
     return (min(r["cached"], r["in"] - 1) // width) * width
 
 
-def predict(model, reqs, mode, num_slots=4, host_ms=0.0, scale=1.0):
+def predict(model, reqs, mode, num_slots=4):
     """Per-request (arrival, start of service, finish) in seconds, plus busy time and step count."""
-    width = MODES[mode][0]
+    width, budget = MODES[mode]
     batched = mode == "batched"
     limit = num_slots if batched else 1
     pending = collections.deque(sorted(range(len(reqs)), key=lambda i: reqs[i]["t"]))
@@ -110,7 +110,7 @@ def predict(model, reqs, mode, num_slots=4, host_ms=0.0, scale=1.0):
         else:
             plan = [[active[0], 1]]
         lanes = [(width, e[1] + j * width) for e, n in plan for j in range(n)]
-        dt = model.device_us(lanes, scale) / 1e6 + model.host_ms(host_ms, lanes) / 1e3
+        dt, gap = model.step_s(lanes, width, budget)
         t += dt
         busy += dt
         steps += 1
@@ -119,6 +119,7 @@ def predict(model, reqs, mode, num_slots=4, host_ms=0.0, scale=1.0):
             if e[1] >= e[2]:
                 finished[e[0]] = t
                 active.remove(e)
+        t += gap
     return started, finished, busy, steps
 
 
@@ -138,12 +139,12 @@ def summary(reqs, started, finished):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["build", "predict", "compare"])
+    ap.add_argument("cmd", choices=["build", "predict"])
     ap.add_argument("--traces")
     ap.add_argument("--data", default=DEFAULT_DATA)
     ap.add_argument("--out", default="agentx_slice.json")
     ap.add_argument("--slice")
-    ap.add_argument("--measured")
+    ap.add_argument("--measured", help="the replay's results JSON, to print next to the prediction")
     ap.add_argument("--window", type=float, default=120.0)
     ap.add_argument("--start", type=float, default=600.0)
     ap.add_argument("--concurrency", type=int, default=48)
@@ -151,20 +152,13 @@ def main():
     ap.add_argument("--decode-tps", type=float, default=100.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--slots", type=int, default=4)
-    ap.add_argument("--host-ms", type=float, default=0.0)
-    ap.add_argument(
-        "--calibrated",
-        action="store_true",
-        help="device scale and host ms per step per mode from the silicon replay; overrides --host-ms",
-    )
     a = ap.parse_args()
     if a.cmd == "build":
         return build(a)
     model = Model.load(a.data)
     reqs = json.load(open(a.slice))["requests"]
-    meas = json.load(open(a.measured))["modes"] if a.cmd == "compare" else {}
-    host = "per mode (calibrated)" if a.calibrated else f"{a.host_ms:g} ms/step"
-    print(f"{len(reqs)} requests; slots {a.slots}; host overhead {host} in the prediction")
+    meas = json.load(open(a.measured))["modes"] if a.measured else {}
+    print(f"{len(reqs)} requests; slots {a.slots}")
     print(
         f"{'mode':>10} | {'pred p50':>8} {'p90':>6} {'p99':>6} {'small50':>7} {'makespan':>8} {'busy':>6} {'steps':>5}"
         + (
@@ -174,8 +168,7 @@ def main():
         )
     )
     for mode in MODES:
-        scale, host_ms = model.calibration(*MODES[mode]) if a.calibrated else (1.0, a.host_ms)
-        st, fi, busy, steps = predict(model, reqs, mode, a.slots, host_ms, scale)
+        st, fi, busy, steps = predict(model, reqs, mode, a.slots)
         p = summary(reqs, st, fi)
         line = (
             f"{mode:>10} | {p['p50']:8.3f} {p['p90']:6.2f} {p['p99']:6.2f} {p['small_p50']:7.3f} {p['makespan']:8.2f} "

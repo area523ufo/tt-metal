@@ -4,8 +4,11 @@
 
 """Replay AgentX traces through the Gemma4 continuous-batching cost model (host only).
 
-    agentx_sim.py --traces .../cc-traces-weka-062126-256k/traces.jsonl \
-        --config 8192x8192:fcfs --config 2048x8192:pack --concurrency 16,32,64 [--cache inf|<tokens>] [--calibrated]
+    agentx_sim.py --traces .../cc-traces-weka-062126-256k/traces.jsonl --config 8192x8192:fcfs,2048x8192:pack \
+        --concurrency 16,32,64 [--cache inf,4e6] [--align chunk,exact] [-j 16] [--json runs.jsonl]
+
+Every knob but --sessions and --seed takes a comma list; the runs are their product, -j at a time (the traces are
+parsed once and shared with the forked workers). One row per run, and one JSON line per run with every metric.
 
 Workload (closed loop, like AIPerf's AgentX replay):
 - Each session is a DAG. Main-agent requests chain in order; each sub-agent chain starts after the main
@@ -19,11 +22,11 @@ Prefill:
   arrival, insert when the request's prefill finishes.
 - The request resumes at its cached depth rounded down to the chunk unit (--align chunk, the block-cyclic
   layout) or exactly (--align exact). Its rows are padded up to whole units.
-- Step cost is Model.step() from cost_model.py: dense(M) + per-request attention at its own depth.
 - Each step runs budget / unit slots (unbatched: unit == budget). fcfs: admission order, a request keeps its slot until
-  done; srpt: the requests with the fewest rows left, one slot each; pack: as srpt, but each takes every slot it still
-  needs. A request's k slots run as k unit-wide lanes (the 2k-lanes runtime).
-- --calibrated scales device time and adds host time per step as measured on silicon (Model.calibration).
+  done; pack: the requests with the fewest rows left first, each taking every slot it still needs. A request's k slots
+  run as k unit-wide lanes (the 2k-lanes runtime).
+- Step time is Model.step_s from cost_model.py (dense(M) + per-request attention at its own depth, calibrated on
+  silicon), plus the scheduler's gap between steps, which advances the clock but is not busy time.
 
 TTFT is from send to prefill done (the decode's first token is not modelled).
 """
@@ -35,15 +38,20 @@ import heapq
 import itertools
 import json
 import math
+import multiprocessing as mp
 import os
 import pickle
 import random
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cost_model import DEFAULT_DATA, Model  # noqa: E402
 
 BLOCK = 64
+# One finished request: sent / done (s), input tokens, cached prefix, where it resumed, rows computed, and the cached
+# prefix an unlimited cache would have had.
+Stat = collections.namedtuple("Stat", "send done n_in cached start rows ideal_hit")
 BUCKETS = [(-1, 1024, "<=1K"), (1024, 4096, "1-4K"), (4096, 16384, "4-16K"), (16384, 1 << 40, ">16K")]
 
 
@@ -165,12 +173,9 @@ def run(
     align="chunk",
     max_think_s=60.0,
     decode_tps=100.0,
-    hit_load_us_per_ktok=0.0,
-    stagger_s=10.0,
     seed=0,
     max_sessions=None,
-    host_ms=0.0,
-    scale=1.0,
+    calibrated=True,
 ):
     rng = random.Random(seed)
     order = list(range(len(sessions)))[:max_sessions]
@@ -185,7 +190,7 @@ def run(
     ready = [0.0] * N  # latest dependency's response time
     rec_ready = [0.0] * N  # latest dependency's recorded end
     children = [[] for _ in range(N)]
-    stats = []  # per request: (send, done, in, cached, start, rows, ideal_hit)
+    stats = []  # Stat per finished request
     arrivals = []  # heap (send time, node)
     left_in_session, sess_done_t = {}, {}
     next_sess = 0
@@ -215,14 +220,14 @@ def run(
         nxt += len(nodes)
 
     for _ in range(min(concurrency, len(order))):
-        start_session(rng.uniform(0.0, stagger_s))
+        start_session(rng.uniform(0.0, 10.0))  # staggered over the first 10 s
 
     t = 0.0
     busy = 0.0
     queue_fcfs = collections.deque()
-    queue_rem = []  # heap (remaining rows, seq, node)
+    queue_rem = []  # pack: heap (remaining rows, seq, node)
     seq = 0
-    req = {}  # node -> [send, in, cached, start, need, progress, first piece pending, ideal_hit]
+    req = {}  # node -> [Stat (done not yet known), rows computed so far]
     rows_total = 0
     steps = 0
     step_log = []  # (t_end, dt, rows)
@@ -237,7 +242,7 @@ def run(
         if align == "chunk":
             start = (start // C) * C
         need = math.ceil((n["in"] - start) / C) * C
-        req[g] = [send, n["in"], cached, start, need, 0, True, ideal_hit]
+        req[g] = [Stat(send, None, n["in"], cached, start, need, ideal_hit), 0]
         if policy == "fcfs":
             queue_fcfs.append(g)
         else:
@@ -245,10 +250,9 @@ def run(
             seq += 1
 
     def finish(g, t_done):
-        send, n_in, cached, start, need, _, _, ideal_hit = req.pop(g)
+        stats.append(req.pop(g)[0]._replace(done=t_done))
         s, i = sess_of[g], local_of[g]
         n = sessions[s][i]
-        stats.append((send, t_done, n_in, cached, start, need, ideal_hit))
         cache.insert(s, n["hashes"])
         if ideal:
             ideal.insert(s, n["hashes"])
@@ -274,54 +278,47 @@ def run(
             t = arrivals[0][0]
             continue
         # pick this step's pieces: [(node, units)]
-        run_list = []
         if policy == "fcfs":
             # admission order; a request keeps its slot until done (unbatched: one request, one chunk per step)
-            for g in itertools.islice(queue_fcfs, slots):
-                run_list.append((g, 1))
+            run_list = [(g, 1) for g in itertools.islice(queue_fcfs, slots)]
         else:
-            free = slots
+            run_list, free = [], slots
             while queue_rem and free > 0:
                 rem, _, g = heapq.heappop(queue_rem)
-                take = min(free, rem // C) if policy == "pack" else 1
+                take = min(free, rem // C)
                 run_list.append((g, take))
                 free -= take
-        batch = []
-        extra = 0.0
-        for g, k in run_list:
-            r = req[g]
-            batch += [(C, r[3] + r[5] + j * C) for j in range(k)]  # k unit-wide lanes of one request
-            if r[6]:  # first piece: load the cached prefix
-                extra += hit_load_us_per_ktok * r[3] / 1000.0
-                r[6] = False
-        dt = (model.device_us(batch, scale) + extra) / 1e6 + model.host_ms(host_ms, batch) / 1e3
+        # k unit-wide lanes per request
+        batch = [(C, req[g][0].start + req[g][1] + j * C) for g, k in run_list for j in range(k)]
+        dt, gap = model.step_s(batch, C, budget, calibrated)
         t += dt
         busy += dt
         steps += 1
         step_log.append((t, dt, sum(k for _, k in run_list) * C))
         for g, k in run_list:
             r = req[g]
-            r[5] += k * C
+            r[1] += k * C
             rows_total += k * C
-            if r[5] >= r[4]:
+            if r[1] >= r[0].rows:
                 if policy == "fcfs":
                     queue_fcfs.remove(g)
                 finish(g, t)
-            elif policy != "fcfs":
-                heapq.heappush(queue_rem, (r[4] - r[5], seq, g))
+            elif policy == "pack":
+                heapq.heappush(queue_rem, (r[0].rows - r[1], seq, g))
                 seq += 1
+        t += gap  # the scheduler's time between steps: wall time, not busy
     out = summarize(stats, t, busy, steps, rows_total)
-    out["_stats"] = stats  # per request, as above; not written to --json
+    out["_stats"] = stats  # not written to --json
     # Steady state: from the end of a short ramp to when the last session started (full concurrency until then).
     hi = t_fed or 0.0
     lo = min(600.0, 0.1 * hi)
     if hi - lo > 60.0:
         w_busy = sum(dt for te, dt, _ in step_log if lo < te <= hi)
         w_rows = sum(rw for te, _, rw in step_log if lo < te <= hi)
-        w = [x for x in stats if lo < x[1] <= hi]
-        w_useful = sum(x[2] - x[3] for x in w)
-        w_useful_ideal = sum(x[2] - x[6] for x in w)
-        ttft = [x[1] - x[0] for x in w]
+        w = [x for x in stats if lo < x.done <= hi]
+        w_useful = sum(x.n_in - x.cached for x in w)
+        w_useful_ideal = sum(x.n_in - x.ideal_hit for x in w)
+        ttft = [x.done - x.send for x in w]
         out.update(
             {
                 "ss_window_s": (lo, hi),
@@ -345,12 +342,12 @@ def pct(xs, p):
 
 
 def summarize(stats, makespan, busy, steps, rows):
-    ttft = [d - s for s, d, *_ in stats]
-    n_in = sum(x[2] for x in stats)
-    cached = sum(x[3] for x in stats)
-    started = sum(x[4] for x in stats)
+    ttft = [x.done - x.send for x in stats]
+    n_in = sum(x.n_in for x in stats)
+    cached = sum(x.cached for x in stats)
+    started = sum(x.start for x in stats)
     useful = n_in - cached  # new to this cache
-    ideal_hit = sum(x[6] for x in stats)
+    ideal_hit = sum(x.ideal_hit for x in stats)
     useful_ideal = n_in - ideal_hit  # new to an unlimited cache: what must be prefilled at all
     out = {
         "requests": len(stats),
@@ -377,26 +374,43 @@ def summarize(stats, makespan, busy, steps, rows):
         "util": busy / makespan,
     }
     for lo, hi, name in BUCKETS:
-        b = [d - s for s, d, i, c, *_ in stats if lo < i - c <= hi]
+        b = [x.done - x.send for x in stats if lo < x.n_in - x.cached <= hi]
         out[f"n_{name}"] = len(b)
         out[f"p50_{name}"], out[f"p99_{name}"] = pct(b, 50), pct(b, 99)
     return out
 
 
-def run_config(model, sessions, cfg, concurrency, cache="inf", calibrated=False, **knobs):
-    """Run one UNITxBUDGET:POLICY config; returns its JSON record (config, knobs and metrics)."""
+G = {}  # the model, the sessions and the fixed knobs, shared with the forked workers
+
+
+def run_config(job):
+    """One run of the grid, job = (UNITxBUDGET:POLICY, concurrency, cache, align, max_think_s, decode_tps); returns
+    its JSON record (the knobs, the metrics and the run's wall time)."""
+    cfg, concurrency, cache, align, max_think_s, decode_tps = job
+    t0 = time.time()
     unit_budget, policy = cfg.split(":")
     C, budget = (int(x) for x in unit_budget.split("x"))
-    if calibrated:
-        knobs["scale"], knobs["host_ms"] = model.calibration(C, budget)
-    cache_tokens = None if cache == "inf" else int(float(cache))
-    r = run(model, sessions, C, budget, policy, concurrency, cache_tokens=cache_tokens, **knobs)
+    assert policy in ("fcfs", "pack"), policy
+    r = run(
+        G["model"],
+        G["sessions"],
+        C,
+        budget,
+        policy,
+        concurrency,
+        cache_tokens=None if cache == "inf" else int(float(cache)),
+        align=align,
+        max_think_s=max_think_s,
+        decode_tps=decode_tps,
+        seed=G["seed"],
+        max_sessions=G["max_sessions"],
+    )
+    knobs = dict(config=cfg, concurrency=concurrency, cache=cache, align=align, max_think_s=max_think_s)
     return {
-        "config": cfg,
-        "concurrency": concurrency,
-        "cache": cache,
         **knobs,
+        "decode_tps": decode_tps,
         **{k: v for k, v in r.items() if not k.startswith("_")},
+        "wall_s": round(time.time() - t0, 2),
     }
 
 
@@ -404,68 +418,51 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--traces", required=True)
     ap.add_argument("--data", default=DEFAULT_DATA)
-    ap.add_argument("--config", action="append", help="UNITxBUDGET:POLICY, e.g. 8192x8192:fcfs, 2048x8192:pack")
-    ap.add_argument("--concurrency", default="32", help="comma-separated sessions in flight")
+    ap.add_argument("--config", default="8192x8192:fcfs,2048x8192:pack", help="UNITxBUDGET:POLICY, POLICY fcfs or pack")
+    ap.add_argument("--concurrency", default="32", help="sessions in flight")
     ap.add_argument("--cache", default="inf", help="inf, or LRU capacity in tokens (e.g. 20e6)")
-    ap.add_argument("--align", default="chunk", choices=["chunk", "exact"])
-    ap.add_argument("--max-think-s", type=float, default=60.0)
-    ap.add_argument("--decode-tps", type=float, default=100.0, help="per-request decode rate for the closed loop")
-    ap.add_argument("--hit-load-us-per-ktok", type=float, default=0.0, help="cost to load a cached prefix")
-    ap.add_argument("--host-ms", type=float, default=0.0, help="host overhead per step")
-    ap.add_argument("--scale", type=float, default=1.0, help="multiply device step time")
-    ap.add_argument(
-        "--calibrated", action="store_true", help="per config scale and host ms from silicon (overrides both)"
-    )
+    ap.add_argument("--align", default="chunk", help="chunk or exact")
+    ap.add_argument("--max-think-s", default="60")
+    ap.add_argument("--decode-tps", default="100", help="per-request decode rate for the closed loop")
     ap.add_argument("--sessions", type=int, default=None, help="first N sessions only")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("-j", type=int, default=1, help="parallel runs")
     ap.add_argument("--json", help="append one JSON line per run here")
     a = ap.parse_args()
 
-    model = Model.load(a.data)
-    sessions = load_sessions(a.traces)
-    configs = a.config or ["8192x8192:fcfs", "2048x8192:pack"]
-    print(
-        f"{len(sessions)} sessions, {sum(map(len, sessions))} requests; cache {a.cache}, align {a.align}, "
-        f"think cap {a.max_think_s:g} s, decode {a.decode_tps:g} tok/s"
+    t0 = time.time()
+    G.update(model=Model.load(a.data), sessions=load_sessions(a.traces), seed=a.seed, max_sessions=a.sessions)
+    split = lambda s, f=str: [f(x) for x in s.split(",") if x]
+    jobs = list(
+        itertools.product(
+            split(a.config),
+            split(a.concurrency, int),
+            split(a.cache),
+            split(a.align),
+            split(a.max_think_s, float),
+            split(a.decode_tps, float),
+        )
     )
+    n_req = sum(map(len, G["sessions"][: a.sessions]))
+    print(f"{n_req} requests; {len(jobs)} runs on {a.j} workers; traces loaded in {time.time() - t0:.1f} s")
     hdr = (
-        f"{'config':>16} {'conc':>4} | {'TTFT p50':>8} {'p90':>7} {'p99':>7} | "
-        + " ".join(f"{n:>11}" for _, _, n in BUCKETS)
-        + f" | {'tok/s':>6} {'useful':>6} {'pad%':>5} {'recmp%':>6} {'hit':>5} {'used':>5} {'util':>5} {'wall h':>6}"
-        + f" | {'ss util':>7} {'ss tok/s':>8} {'ss useful':>9} {'ss p50':>6} {'ss p99':>6}"
+        f"{'config':>16} {'conc':>4} {'cache':>5} {'align':>5} {'think':>5} | {'TTFT p50':>8} {'p90':>6} {'p99':>6} | "
+        f"{'tok/s':>6} {'useful':>6} {'pad%':>5} {'recmp%':>6} {'hit':>5} {'used':>5} | "
+        f"{'ss util':>7} {'ss useful':>9} {'ss p50':>6} {'ss p99':>6}"
     )
-    print(hdr)
-    print("-" * len(hdr))
-    for cfg in configs:
-        for conc in (int(x) for x in a.concurrency.split(",")):
-            r = run_config(
-                model,
-                sessions,
-                cfg,
-                conc,
-                a.cache,
-                a.calibrated,
-                align=a.align,
-                max_think_s=a.max_think_s,
-                decode_tps=a.decode_tps,
-                hit_load_us_per_ktok=a.hit_load_us_per_ktok,
-                seed=a.seed,
-                max_sessions=a.sessions,
-                host_ms=a.host_ms,
-                scale=a.scale,
+    print(hdr + "\n" + "-" * len(hdr), flush=True)
+    with mp.get_context("fork").Pool(a.j) as pool:
+        for r in pool.imap(run_config, jobs):
+            ss = (
+                f"{r['ss_util']:7.2f} {r['ss_useful_ideal_tok_s'] / 1e3:8.1f}k {r['ss_ttft_p50']:6.2f} {r['ss_ttft_p99']:6.1f}"
+                if "ss_util" in r
+                else "(no steady window)"
             )
-            b = " ".join(f"{r[f'p50_{n}']:5.2f}/{r[f'p99_{n}']:5.1f}" for _, _, n in BUCKETS)
             print(
-                f"{cfg:>16} {conc:>4} | {r['ttft_p50']:8.2f} {r['ttft_p90']:7.2f} {r['ttft_p99']:7.2f} | {b} | "
+                f"{r['config']:>16} {r['concurrency']:>4} {r['cache']:>5} {r['align']:>5} {r['max_think_s']:5g} | "
+                f"{r['ttft_p50']:8.2f} {r['ttft_p90']:6.2f} {r['ttft_p99']:6.1f} | "
                 f"{r['tok_s_busy'] / 1e3:5.1f}k {r['useful_tok_s_busy'] / 1e3:5.1f}k {r['pad_pct']:5.1f} "
-                f"{r['recompute_pct']:6.1f} {r['hit_rate']:5.3f} {r['hit_rate_used']:5.3f} {r['util']:5.2f} "
-                f"{r['makespan_s'] / 3600:6.2f} | "
-                + (
-                    f"{r['ss_util']:7.2f} {r['ss_tok_s'] / 1e3:7.1f}k {r['ss_useful_tok_s'] / 1e3:8.1f}k "
-                    f"{r['ss_ttft_p50']:6.2f} {r['ss_ttft_p99']:6.1f}"
-                    if "ss_util" in r
-                    else "  (no steady window)"
-                ),
+                f"{r['recompute_pct']:6.1f} {r['hit_rate']:5.3f} {r['hit_rate_used']:5.3f} | {ss}",
                 flush=True,
             )
             if a.json:
