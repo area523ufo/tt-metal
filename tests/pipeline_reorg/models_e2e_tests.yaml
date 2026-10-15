@@ -549,7 +549,7 @@
 
 - name: Qwen3-TTS e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0 HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub
+    export HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub
     export HF_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/Qwen/Qwen3-TTS-12Hz-1.7B-Base
     pytest --timeout 900 models/demos/audio/qwen3_tts/tests/e2e/test_e2e.py
   model: qwen3-tts-1.7b
@@ -567,7 +567,7 @@
 
 - name: Qwen3-TTS 0.6B e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0 HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub
+    export HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub
     export HF_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-Base TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/Qwen/Qwen3-TTS-12Hz-0.6B-Base
     pytest --timeout 900 models/demos/audio/qwen3_tts/tests/e2e/test_e2e.py
   model: qwen3-tts-0.6b
@@ -973,7 +973,7 @@
 
 - name: Whisper e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0 HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub HF_DATASETS_CACHE=/tmp/huggingface/datasets
+    export HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub HF_DATASETS_CACHE=/tmp/huggingface/datasets
     pytest --timeout=600 models/demos/audio/whisper/demo/demo.py --input-path="models/demos/audio/whisper/demo/dataset/conditional_generation" -k "conditional_generation"
   model: whisper
   model_family: Whisper
@@ -1063,7 +1063,6 @@
 
 - name: TT-DiT Flux.1 schnell e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1
     pytest --timeout 10000 models/tt_dit/tests/models/flux1/test_performance_flux1.py -k flux_schnell
   model: flux.1-schnell
@@ -1142,7 +1141,6 @@
 
 - name: Z-Image-Turbo e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
     pytest --timeout 600 models/demos/z_image_turbo/tests/test_pipeline.py
   model: z-image-turbo
   model_family: Z-Image
@@ -1158,7 +1156,6 @@
 
 - name: Stable Diffusion XL (base) e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     pytest models/demos/stable_diffusion_xl_base/demo/demo.py -k "device_vae and device_encoders and with_trace and no_cfg_parallel"
   model: sdxl
   model_family: Stable Diffusion
@@ -1178,7 +1175,6 @@
 # tensor parralel requires 2 chips, so it is split out to a separate test
 - name: Stable Diffusion XL (base tensor-parallel) e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     pytest models/demos/stable_diffusion_xl_base/demo/demo.py -k "device_vae and device_encoders and with_trace and use_cfg_parallel" --timeout=600
   model: sdxl
   model_family: Stable Diffusion
@@ -1193,7 +1189,6 @@
 
 - name: Stable Diffusion XL (lora) e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     pytest models/demos/stable_diffusion_xl_base/demo/demo_lora.py -k "device_vae and device_encoders and with_trace and no_cfg_parallel"
   model: sdxl
   model_family: Stable Diffusion
@@ -1208,7 +1203,6 @@
 
 - name: Stable Diffusion XL (base + refiner) e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     pytest models/demos/stable_diffusion_xl_base/demo/demo_base_and_refiner.py -k "device_vae and device_encoders and with_trace and no_cfg_parallel"
   model: sdxl
   model_family: Stable Diffusion
@@ -1227,7 +1221,6 @@
 
 - name: Stable Diffusion XL (img2img + inpainting) e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     # Stop at the first failed command: the devices are not reset between commands (#57706).
     pytest models/demos/stable_diffusion_xl_base/demo/demo_img2img.py -k "device_vae and device_encoders and with_trace and no_cfg_parallel" || exit $?
     pytest models/demos/stable_diffusion_xl_base/demo/demo_inpainting.py -k "device_vae and device_encoders and with_trace and no_cfg_parallel" || exit $?
@@ -1310,7 +1303,6 @@
 # ── Qwen-Image (TT-DiT) ────────────────────────────────────────────
 - name: TT-DiT Qwen-Image e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
     export TT_DIT_CACHE_DIR=/tmp/TT_DIT_CACHE NO_PROMPT=1
     # #58835: since #52893 the read-only pinned upload of ttnn.load_tensor mmaps makes the per-call
     # weight swaps 2.7x slower on QB2 (34 s -> 94 s per 12 cached loads); keep the copy path like the Wan2.2 legs.
@@ -1395,7 +1387,6 @@
 # its checkpoint from the hub (same pattern as the SDXL entries above).
 - name: ViT e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     pytest --timeout 900 models/demos/vision/classification/vit/wormhole/tests/test_demo_vit_ttnn_inference_perf_e2e_2cq_trace.py
   model: vit
   model_family: ViT
@@ -1563,7 +1554,6 @@
 
 - name: ResNet-50 e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     pytest --timeout 300 models/demos/vision/classification/resnet50/wormhole/demo/demo.py
     pytest --timeout 120 models/demos/vision/classification/resnet50/wormhole/tests/test_resnet50_stability.py -k "short"
     pytest --timeout 300 models/demos/vision/classification/resnet50/ttnn_resnet/tests/test_demo.py
@@ -1582,7 +1572,6 @@
 
 - name: TT-DiT Wan2.2-T2V-A14B e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1 TT_DIT_CACHE_DIR=/tmp/TT_DIT_CACHE VBENCH_CACHE_DIR=/mnt/MLPerf/vbench TORCH_HOME=/mnt/MLPerf/vbench/torch_hub
     pytest --timeout 3500 models/tt_dit/tests/models/wan2_2/test_performance_wan.py \
       -k "resolution_480p and t2v" || exit $?
@@ -1608,7 +1597,7 @@
 # ── WAN 2.2 (Black Hole quad galaxy, bh_sc4 / exabox-multihost-ci-sc4) ──
 - name: TT-DiT Wan2.2-T2V-A14B multihost quad e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
+    export HF_HUB_OFFLINE=1 HF_HOME=/mnt/models/huggingface
     export NO_PROMPT=1 TT_METAL_PINNED_MEMORY_CACHE_LIMIT_BYTES=0 TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=120000 TT_DIT_CACHE_DIR="$HOME/.cache/tt-dit"
     export VBENCH_CACHE_DIR=/mnt/models/vbench TORCH_HOME=/mnt/models/vbench/torch_hub
     MGD="${TT_METAL_HOME}/tt_metal/fabric/mesh_graph_descriptors/32x4_quad_bh_galaxy_torus_xy_graph_descriptor.textproto"
@@ -1651,7 +1640,7 @@
 
 - name: TT-DiT Wan2.2-I2V-A14B multihost quad e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
+    export HF_HUB_OFFLINE=1 HF_HOME=/mnt/models/huggingface
     export NO_PROMPT=1 TT_METAL_PINNED_MEMORY_CACHE_LIMIT_BYTES=0 TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=120000 TT_DIT_CACHE_DIR="$HOME/.cache/tt-dit"
     export VBENCH_CACHE_DIR=/mnt/models/vbench TORCH_HOME=/mnt/models/vbench/torch_hub
     MGD="${TT_METAL_HOME}/tt_metal/fabric/mesh_graph_descriptors/32x4_quad_bh_galaxy_torus_xy_graph_descriptor.textproto"
@@ -1695,7 +1684,7 @@
 # ── WAN 2.2 (Black Hole single galaxy, bh_sc1) ───────────────────
 - name: TT-DiT Wan2.2-T2V-A14B single galaxy e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE    # umt5 fetches the Wan2.2 tokenizer from the hub
+    export HF_HUB_OFFLINE=1
     export NO_PROMPT=1
     export HF_HOME=/mnt/models/huggingface
     export TT_DIT_CACHE_DIR="$HOME/.cache/tt-dit"
@@ -1723,7 +1712,7 @@
 
 - name: TT-DiT Wan2.2-I2V-A14B single galaxy e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE    # umt5 fetches the Wan2.2 tokenizer from the hub
+    export HF_HUB_OFFLINE=1
     export NO_PROMPT=1
     export HF_HOME=/mnt/models/huggingface
     export TT_DIT_CACHE_DIR="$HOME/.cache/tt-dit"
@@ -1911,7 +1900,6 @@
 
 - name: BGE-M3 e2e tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     export HF_MODEL=BAAI/bge-m3
     pytest --timeout 300 models/demos/wormhole/bge_m3/demo/demo.py
   model: bge_m3

@@ -5,7 +5,6 @@
 import pytest
 import torch
 import transformers
-from datasets import load_dataset
 from transformers import AutoImageProcessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
@@ -80,17 +79,16 @@ def test_vit_patch_embeddings(device, model_name, batch_size, image_size, image_
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("image_size", [224])
 @pytest.mark.parametrize("image_channels", [3])
-def test_vit_embeddings(device, model_name, batch_size, image_size, image_channels, model_location_generator):
+def test_vit_embeddings(
+    device, model_name, batch_size, image_size, image_channels, model_location_generator, hf_cat_image_sample_input
+):
     torch.manual_seed(0)
 
     config = transformers.ViTConfig.from_pretrained(model_name)
     config = ttnn_optimized_sharded_vit.update_model_config(config, batch_size)
     model = load_torch_model(model_location_generator, embedding=True)
 
-    dataset = load_dataset(
-        "huggingface/cats-image", revision="ccdec0af347ae11c5315146402c3e16c8bbf4149", trust_remote_code=True
-    )
-    image = dataset["test"]["image"][0]
+    image = hf_cat_image_sample_input
     image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224")
     torch_pixel_values = image_processor(image, return_tensors="pt").pixel_values
     torch_pixel_values = torch_pixel_values.repeat(batch_size, 1, 1, 1)
@@ -408,16 +406,22 @@ def test_vit_encoder(device, model_name, batch_size, sequence_size, model_locati
 @pytest.mark.parametrize("image_size", [224])
 @pytest.mark.parametrize("image_channels", [3])
 @pytest.mark.parametrize("sequence_size", [224])
-def test_vit(device, model_name, batch_size, image_size, image_channels, sequence_size, model_location_generator):
+def test_vit(
+    device,
+    model_name,
+    batch_size,
+    image_size,
+    image_channels,
+    sequence_size,
+    model_location_generator,
+    hf_cat_image_sample_input,
+):
     torch.manual_seed(0)
 
     model = load_torch_model(model_location_generator, embedding=True)
     config = model.config
     config = ttnn_optimized_sharded_vit.update_model_config(config, batch_size)
-    dataset = load_dataset(
-        "huggingface/cats-image", revision="ccdec0af347ae11c5315146402c3e16c8bbf4149", trust_remote_code=True
-    )
-    image = dataset["test"]["image"][0]
+    image = hf_cat_image_sample_input
     image_processor = AutoImageProcessor.from_pretrained("google/vit-base-patch16-224")
     torch_pixel_values = image_processor(image, return_tensors="pt").pixel_values
     torch_pixel_values = torch_pixel_values.repeat(batch_size, 1, 1, 1)

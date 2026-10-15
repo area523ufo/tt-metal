@@ -315,7 +315,6 @@
 
 - name: ViT unit tests
   cmd: |
-    export HF_HUB_OFFLINE=0
     pytest --timeout 1500 models/demos/vision/classification/vit/wormhole/tests/test_ttnn_optimized_sharded_vit_wh.py
   model: vit
   model_family: ViT
@@ -948,7 +947,7 @@
 - name: Whisper unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    export HF_HUB_OFFLINE=0 HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub HF_DATASETS_CACHE=/tmp/huggingface/datasets
+    export HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub HF_DATASETS_CACHE=/tmp/huggingface/datasets
     pytest --timeout 600 models/demos/audio/whisper/tests/test_whisper_modules.py
     pytest --timeout 600 models/demos/audio/whisper/tests/test_whisper_streaming_detok.py
   model: whisper
@@ -970,7 +969,7 @@
 - name: Qwen3-TTS unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    export HF_HUB_OFFLINE=0 HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub
+    export HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub
     export HF_MODEL=Qwen/Qwen3-TTS-12Hz-1.7B-Base TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/Qwen/Qwen3-TTS-12Hz-1.7B-Base
     pytest --timeout 600 models/demos/audio/qwen3_tts/tests/pcc/test_speaker_pcc.py
     pytest --timeout 900 models/demos/audio/qwen3_tts/tests/pcc/test_talker_pcc.py
@@ -994,7 +993,7 @@
 - name: Qwen3-TTS 0.6B unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    export HF_HUB_OFFLINE=0 HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub
+    export HF_HOME=/mnt/MLPerf/huggingface HF_HUB_CACHE=/mnt/MLPerf/huggingface/hub
     export HF_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-Base TT_CACHE_PATH=/mnt/MLPerf/huggingface/tt_cache/Qwen/Qwen3-TTS-12Hz-0.6B-Base
     pytest --timeout 600 models/demos/audio/qwen3_tts/tests/pcc/test_speaker_pcc.py
     pytest --timeout 900 models/demos/audio/qwen3_tts/tests/pcc/test_talker_pcc.py
@@ -1251,7 +1250,6 @@
 - name: TT-DiT Flux.1-schnell unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1
     pytest --timeout 10000 models/tt_dit/tests/models/flux1/test_pipeline_flux1.py -k flux_schnell
     pytest --timeout 10000 models/tt_dit/tests/models/flux1/test_transformer_flux1.py -k flux_schnell
@@ -1332,7 +1330,6 @@
 
 - name: Z-Image-Turbo unit tests
   cmd: |
-    unset HF_HUB_OFFLINE
     pytest --timeout 600 models/demos/z_image_turbo/tests/test_text_encoder.py
     pytest --timeout 600 models/demos/z_image_turbo/tests/test_dit.py
     pytest --timeout 600 models/demos/z_image_turbo/tests/test_vae.py
@@ -1349,7 +1346,6 @@
 - name: Stable Diffusion XL LoRA unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    export HF_HUB_OFFLINE=0
     # Stop at the first failed command: the devices are not reset between commands (#57706).
     pytest --timeout 900 models/demos/stable_diffusion_xl_base/lora/tests/test_lora_fusion.py || exit $?
     pytest --timeout 900 models/demos/stable_diffusion_xl_base/lora/tests/test_lora_rollback.py || exit $?
@@ -1373,7 +1369,6 @@
 - name: Stable Diffusion XL refiner unit tests
   cmd: |
     export TT_METAL_WATCHER=15
-    export HF_HUB_OFFLINE=0
     pytest --timeout 600 models/demos/stable_diffusion_xl_base/refiner/tests/pcc --ignore=models/demos/stable_diffusion_xl_base/refiner/tests/pcc/test_unet_loop.py
   model: sdxl
   model_family: Stable Diffusion
@@ -1394,7 +1389,6 @@
 - name: Stable Diffusion XL VAE unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    export HF_HUB_OFFLINE=0
     pytest --timeout 600 models/demos/stable_diffusion_xl_base/vae/tests/pcc --ignore=models/demos/stable_diffusion_xl_base/vae/tests/pcc/test_welford_state_leak_regression.py
   model: sdxl
   model_family: Stable Diffusion
@@ -1415,7 +1409,6 @@
 - name: Stable Diffusion XL base unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    export HF_HUB_OFFLINE=0
     pytest --timeout 600 models/demos/stable_diffusion_xl_base/tests/pcc --ignore=models/demos/stable_diffusion_xl_base/tests/pcc/test_unet_loop.py --ignore=models/demos/stable_diffusion_xl_base/tests/pcc/test_euler_discrete_scheduler.py
   model: sdxl
   model_family: Stable Diffusion
@@ -1436,7 +1429,6 @@
 - name: Stable Diffusion XL base unet-loop unit tests
   cmd: |
     export TT_METAL_WATCHER=15
-    export HF_HUB_OFFLINE=0
     # Stop at the first failed command: the devices are not reset between commands (#57706).
     pytest --timeout 1800 models/demos/stable_diffusion_xl_base/tests/pcc/test_unet_loop.py || exit $?
     pytest models/demos/stable_diffusion_xl_base/tests/pcc/test_unet_loop.py --loop-iter-num=50 -v -m "not disable_fast_runtime_mode" --timeout=600 || exit $?
@@ -1459,7 +1451,6 @@
 - name: Stable Diffusion XL refiner unet-loop unit tests
   cmd: |
     export TT_METAL_WATCHER=15
-    export HF_HUB_OFFLINE=0
     # Stop at the first failed command: the devices are not reset between commands (#57706).
     pytest --timeout 1800 models/demos/stable_diffusion_xl_base/refiner/tests/pcc/test_unet_loop.py || exit $?
     pytest models/demos/stable_diffusion_xl_base/refiner/tests/pcc/test_unet_loop.py --loop-iter-num=50 -v -m "not disable_fast_runtime_mode" --timeout=600 || exit $?
@@ -1519,7 +1510,6 @@
 # ── Qwen-Image (TT-DiT) ────────────────────────────────────────────
 - name: TT-DiT Qwen-Image unit tests
   cmd: |
-    unset HF_HUB_OFFLINE
     export TT_METAL_WATCHER=30
     export TT_DIT_CACHE_DIR=/tmp/TT_DIT_CACHE
     pytest --timeout 1500 models/tt_dit/tests/encoders/qwen25vl/test_qwen25vl.py::test_qwen25vl_encoder_pair
@@ -1589,7 +1579,6 @@
 - name: TT-DiT Wan2.2-T2V-A14B unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    unset HF_HUB_OFFLINE
     export TT_DIT_CACHE_DIR=/tmp/TT_DIT_CACHE
     pytest --timeout 1000 models/tt_dit/tests/models/wan2_2/test_rope.py
     pytest --timeout 1000 models/tt_dit/tests/models/wan2_2/test_attention_wan.py
@@ -1613,7 +1602,6 @@
 - name: TT-DiT Wan2.2-I2V-A14B unit tests
   cmd: |
     export TT_METAL_WATCHER=45
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1 VBENCH_CACHE_DIR=/mnt/MLPerf/vbench TORCH_HOME=/mnt/MLPerf/vbench/torch_hub
     pytest --timeout 10000 models/tt_dit/tests/models/wan2_2/test_pipeline_wan_i2v.py -k "is_fsdp1"
   # NOTE! The -k filtering above is a hack! We ideally should test both is_fsdp0 and is_fsdp1
@@ -1688,7 +1676,7 @@
     # Multihost jobs skip setup-job's watcher env; DISABLE_ETH avoids the ACTIVE_ETH overflow.
     export TT_METAL_WATCHER=30 TT_METAL_WATCHER_APPEND=1
     export TT_METAL_WATCHER_NOINLINE=1 TT_METAL_WATCHER_DISABLE_ETH=1
-    unset HF_HUB_OFFLINE    # umt5 fetches the Wan2.2 tokenizer from the hub
+    export HF_HUB_OFFLINE=1
     export NO_PROMPT=1
     export HF_HOME=/mnt/models/huggingface
     export TT_DIT_CACHE_DIR=/tmp/TT_DIT_CACHE
@@ -1718,7 +1706,7 @@
     # Multihost jobs skip setup-job's watcher env; DISABLE_ETH avoids the ACTIVE_ETH overflow.
     export TT_METAL_WATCHER=30 TT_METAL_WATCHER_APPEND=1
     export TT_METAL_WATCHER_NOINLINE=1 TT_METAL_WATCHER_DISABLE_ETH=1
-    unset HF_HUB_OFFLINE    # umt5 fetches the Wan2.2 tokenizer from the hub
+    export HF_HUB_OFFLINE=1
     export NO_PROMPT=1
     export HF_HOME=/mnt/models/huggingface
     export TT_DIT_CACHE_DIR=/tmp/TT_DIT_CACHE
@@ -1752,7 +1740,7 @@
     # tt-run forwards TT_* variables to every rank, so all four galaxies are watched.
     export TT_METAL_WATCHER=30 TT_METAL_WATCHER_APPEND=1
     export TT_METAL_WATCHER_NOINLINE=1 TT_METAL_WATCHER_DISABLE_ETH=1
-    unset HF_HUB_OFFLINE
+    export HF_HUB_OFFLINE=1 HF_HOME=/mnt/models/huggingface
     export NO_PROMPT=1 TT_METAL_PINNED_MEMORY_CACHE_LIMIT_BYTES=0 TT_METAL_FABRIC_ROUTER_SYNC_TIMEOUT_MS=120000
     MGD="${TT_METAL_HOME}/tt_metal/fabric/mesh_graph_descriptors/32x4_quad_bh_galaxy_torus_xy_graph_descriptor.textproto"
     UNIT_TEST="${TT_METAL_HOME}/models/tt_dit/tests/models/wan2_2/test_transformer_wan.py"
