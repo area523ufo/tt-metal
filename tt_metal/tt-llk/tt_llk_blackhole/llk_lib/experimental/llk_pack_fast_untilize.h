@@ -67,7 +67,6 @@
 
 #include "experimental/llk_fast_untilize_common.h"
 #include "llk_pack.h"
-#include "llk_pack_untilize.h"
 
 namespace ckernel
 {
@@ -329,13 +328,7 @@ inline void _llk_pack_fast_untilize_init_(const std::uint32_t pack_src_format, c
     }
     // Calls start from these counters and leave them so.
     TTI_SETADCXY(p_setadc::PAC, 0, 0, 0, 0, 0b1011);
-    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b1111);
-    // Whole-row chunks and whole-row face-pair passes write their blocks one after another.
-    constexpr bool face_passes      = block_ct_dim == FAST_UNTILIZE_MAX_PASS_UNIT_DIM;
-    constexpr bool whole_row_blocks = full_ct_dim <= block_ct_dim;
-    const std::uint32_t block_bytes = SCALE_DATUM_SIZE(pack_dst_format, full_ct_dim * TILE_C_DIM) * (face_passes ? FAST_UNTILIZE_PHASE_ROWS : TILE_R_DIM);
-    constexpr std::uint32_t pacrs_per_block = (face_passes ? 1 : 2) * FAST_UNTILIZE_PHASE_ROWS * ((full_ct_dim + 1) / 2);
-    _llk_pack_untilize_run_init_((whole_row_blocks && (block_bytes % 16 == 0)) ? block_bytes / 16 : 0, block_bytes, pacrs_per_block);
+    TTI_SETADCZW(p_setadc::PAC, 0, 0, 0, 0, 0b0111);
 }
 
 template <std::uint32_t phase_offset>
@@ -375,7 +368,7 @@ inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const st
     LLK_ASSERT(unit_dim >= 2 && unit_dim <= block_ct_dim, "fast_untilize pack unit_dim must be in [2, block_ct_dim]");
     LLK_ASSERT(block_ct_dim == pack_fast_untilize_init_block_ct_dim, "fast_untilize: the block's chunk width differs from the init's");
 
-    const std::uint32_t run_w = _llk_pack_untilize_program_destination_(address);
+    program_packer_destination(address);
 
     // Phase 1 emits top strip rows and keeps the pack stream open; phase 2 emits the bottom strip rows and closes it.
     if (unit_dim != prev_unit_dim)
@@ -391,7 +384,6 @@ inline void _llk_pack_fast_untilize_block_(const std::uint32_t address, const st
     TTI_SETADC(p_setadc::PAC, p_setadc::CH_0, p_setadc::SET_W, 0);
     ckernel_template::run();
     _llk_pack_fast_untilize_last_row_<block_ct_dim>(unit_dim, true);
-    _llk_pack_untilize_end_destination_(run_w);
 }
 
 // The packer carries the destination Y offset (ADC.Y * Ystride) relative to the
@@ -537,9 +529,8 @@ inline void _llk_pack_fast_untilize_pass_block_(
         prev_unit_dim = unit_dim | FAST_UNTILIZE_PASS_MOP_KEY;
     }
     // The bottom strip is the DEST window itself and the counters start at zero.
-    const std::uint32_t run_w = _llk_pack_untilize_program_destination_(address + pass * FAST_UNTILIZE_PHASE_ROWS * output_row_stride_16B);
+    program_packer_destination(address + pass * FAST_UNTILIZE_PHASE_ROWS * output_row_stride_16B);
     ckernel_template::run();
-    _llk_pack_untilize_end_destination_(run_w);
 }
 
 // One face-pair pass of a unit inside a wider row; `address` is the unit's column in output row 0.
