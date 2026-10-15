@@ -141,6 +141,7 @@ void kernel_main() {
             source_device,
             cache_local_tile_rows,
             halo_slot_count,
+            /*circular_kv_slab_count=*/0,
             hop);
         for (uint32_t input = 0; input < num_inputs; ++input) {
             const uint32_t input_Wt = get_arg_val<uint32_t>(arg_idx++);
@@ -160,6 +161,7 @@ void kernel_main() {
                 source_device,
                 cache_local_tile_rows,
                 halo_slot_count,
+                /*circular_kv_slab_count=*/0,
                 hop,
                 sources.first_start_tile,
                 mc_hop_count,

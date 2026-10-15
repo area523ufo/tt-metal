@@ -114,6 +114,7 @@ void kernel_main() {
             source_device,
             cache_local_tile_rows,
             halo_slot_count,
+            /*circular_kv_slab_count=*/0,
             hop);
         const uint32_t tail_tile_rows = ttnn::operations::transformer::sdpa::ring_joint::chunked_sliding_halo_hop_rows(
             halo_tile_rows, q_local_tile_rows, hop);
@@ -134,6 +135,7 @@ void kernel_main() {
                 source_device,
                 cache_local_tile_rows,
                 halo_slot_count,
+                /*circular_kv_slab_count=*/0,
                 hop,
                 sources.first_start_tile,
                 mc_hop_count,
