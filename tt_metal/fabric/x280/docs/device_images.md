@@ -188,13 +188,7 @@ VLEN=512 → 64 bytes per `vse32.v` store. This is what gets you to
 
 ### Host → X280 NOC writes
 
-```python
-chip.noc_write32(0, noc_x, noc_y, addr, value)        # 32-bit
-chip.noc_write(0, noc_x, noc_y, addr, byte_data)      # bulk
-chip.noc_read(0, noc_x, noc_y, addr, buf)             # bulk
-```
-
-`addr` is the L2CPU-local address (for example, `X280_LIM_BASE` =
+A host NOC access to an L2CPU takes the L2CPU-local address (for example, `X280_LIM_BASE` =
 `0x08000000` and `X280_LOCAL_DDR_TILE_BASE` = `0x400030000000`, from
 `x280_address_map.h`).
 
@@ -390,7 +384,6 @@ aborts cleanly with `AMO-to-LIM supported: False`.
 // From x280_address_map.h
 #define X280_LOCAL_DDR_TILE_BASE 0x400030000000ULL
 #define X280_LIM_BASE            0x08000000ULL
-#define X280_SENTINEL_ADDR       0x08100000ULL
 #define X280_CLINT_BASE          0x02000000ULL
 ```
 
