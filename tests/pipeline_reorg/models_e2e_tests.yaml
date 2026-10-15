@@ -1079,7 +1079,6 @@
 
 - name: TT-DiT Flux.1 dev e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1
     pytest --timeout 10000 models/tt_dit/tests/models/flux1/test_performance_flux1.py -k flux_dev
   model: flux.1-dev
@@ -1097,7 +1096,6 @@
 - name: TT-DiT Flux.2-dev e2e tests
   cmd: |
     unset TT_METAL_WATCHER  # blocked by #50886
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1
     export TT_DIT_CACHE_DIR=/mnt/MLPerf/huggingface/tt_dit_cache/black-forest-labs/FLUX.2-dev
     # Stop at the first failed command: the devices are not reset between commands (#57706).
@@ -1119,7 +1117,7 @@
 - name: TT-DiT Flux.2-dev multihost e2e tests
   cmd: |
     unset TT_METAL_WATCHER  # blocked by #50886
-    unset HF_HUB_OFFLINE
+    export HF_HUB_OFFLINE=1
     export NO_PROMPT=1
     export HF_HOME=/mnt/models/huggingface
     export TT_DIT_CACHE_DIR="$HOME/.cache/tt-dit"
@@ -1271,7 +1269,6 @@
 
 - name: TT-DiT Stable Diffusion 3.5 Large e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1
     pytest --timeout 1200 models/tt_dit/tests/models/sd35/test_pipeline_sd35.py
     pytest --timeout 600 models/tt_dit/tests/models/sd35/test_performance_sd35.py
@@ -1333,7 +1330,6 @@
 
 - name: TT-DiT Motif-Image-6B e2e tests
   cmd: |
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1
     pytest --timeout 1500 models/tt_dit/tests/models/motif/test_pipeline_motif.py
     pytest --timeout 900 models/tt_dit/tests/models/motif/test_performance_motif.py

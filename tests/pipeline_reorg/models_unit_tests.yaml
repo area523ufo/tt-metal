@@ -1188,7 +1188,6 @@
 - name: TT-DiT encoder unit tests, shared amongst all models.
   cmd: |
     export TT_METAL_WATCHER=30
-    unset HF_HUB_OFFLINE  # umt5 fetches the Wan2.2 tokenizer from the hub
     export TT_DIT_CACHE_DIR=/tmp/TT_DIT_CACHE
     export DIT_UNIT_TEST=1  # read at collection time by t5/test_t5_full, umt5/test_umt5, clip/test_clip_full_projection
     # No -k: params needing more than 8 devices skip themselves in the mesh_device fixture.
@@ -1269,7 +1268,6 @@
 - name: TT-DiT Flux.1-dev unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    unset HF_HUB_OFFLINE
     export NO_PROMPT=1
     pytest --timeout 10000 models/tt_dit/tests/models/flux1/test_pipeline_flux1.py -k flux_dev
     pytest --timeout 10000 models/tt_dit/tests/models/flux1/test_transformer_flux1.py -k flux_dev
@@ -1288,7 +1286,6 @@
 - name: TT-DiT Flux.2-dev unit tests
   cmd: |
     export TT_METAL_WATCHER=30
-    unset HF_HUB_OFFLINE
     export TT_DIT_CACHE_DIR=/mnt/MLPerf/huggingface/tt_dit_cache/black-forest-labs/FLUX.2-dev
     # Stop at the first failed command: the devices are not reset between commands (#57706).
     pytest --timeout 900 -rs models/tt_dit/tests/models/flux2/test_vae_flux2.py || exit $?
@@ -1310,7 +1307,7 @@
   cmd: |
     export TT_METAL_WATCHER=30
     export TT_METAL_WATCHER_DISABLE_ETH=1 # Program size (28864) too large for kernel config buffer (26624) on ACTIVE_ETH
-    unset HF_HUB_OFFLINE
+    export HF_HUB_OFFLINE=1
     export NO_PROMPT=1
     export HF_HOME=/mnt/models/huggingface
     export TT_DIT_CACHE_DIR="$HOME/.cache/tt-dit"
@@ -1485,7 +1482,6 @@
 - name: TT-DiT Stable Diffusion 3.5 Large unit tests
   cmd: |
     export TT_METAL_WATCHER=15
-    unset HF_HUB_OFFLINE
     pytest --timeout 300 models/tt_dit/tests/models/sd35/test_vae_sd35.py
     pytest --timeout 300 models/tt_dit/tests/models/sd35/test_attention_sd35.py
     pytest --timeout 300 models/tt_dit/tests/models/sd35/test_transformer_sd35.py::test_sd35_transformer_block
@@ -1541,7 +1537,6 @@
 - name: TT-DiT Motif-Image-6B unit tests
   cmd: |
     export TT_METAL_WATCHER=15
-    unset HF_HUB_OFFLINE
     pytest --timeout 300 models/tt_dit/tests/models/motif/test_attention_motif.py
     pytest --timeout 300 models/tt_dit/tests/models/motif/test_transformer_block_motif.py
     pytest --timeout 900 models/tt_dit/tests/models/motif/test_transformer_motif.py
@@ -1569,7 +1564,8 @@
 # it to the multihost job because the SKU label is exabox-multihost-ci-*.
 - name: "Flux multihost tests"
   cmd: |
-    unset HF_HUB_OFFLINE
+    export HF_HUB_OFFLINE=1
+    export HF_HOME=/mnt/models/huggingface
     export NO_PROMPT=1
     # Plain single-rank mpirun (no tt-run). Host topology comes from the multihost-ci
     # runner (/etc/ttop/hostfile). The rank owns one connected 4x2 (8-device) block,
