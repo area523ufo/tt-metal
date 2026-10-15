@@ -333,7 +333,7 @@ void ExpectDeviceProfilerSkippedOnMock(distributed::MeshDevice& mock_mesh_device
 void RunCoexistingMockAndSiliconDevice(bool expect_profiler) {
     // Create silicon mesh
     MetalEnv silicon_env;
-    const tt::ARCH silicon_arch = silicon_env.get_arch();
+    const tt::ARCH silicon_arch = silicon_env.get_device_properties().arch();
 
     auto mesh_shape = silicon_env.get_system_mesh().shape();
     auto mesh_device_config = distributed::MeshDeviceConfig(mesh_shape);
@@ -387,7 +387,7 @@ void RunCoexistingSiliconAndMockDevice(bool expect_profiler) {
     tt::ARCH silicon_arch;
     {
         MetalEnv probe;
-        silicon_arch = probe.get_arch();
+        silicon_arch = probe.get_device_properties().arch();
     }
 
     // Create mock mesh device with 1 chip on the silicon arch
@@ -460,7 +460,7 @@ TEST(MetalContextIntegrationTest, HelloWorldQueryThenCreate) {
     {
         MetalEnv env;
 
-        size_t l1_size = env.get_l1_size();
+        size_t l1_size = env.get_device_properties().l1_size();
         size_t trace_region_size = l1_size * 0.3;
         size_t l1_small_region_size = l1_size * 0.05;
 
@@ -670,8 +670,9 @@ TEST(MetalContextIntegrationTest, ForkMockAndRealDevice) {
     {
         MetalEnv env;
 
-        auto arch = env.get_arch();
-        auto l1_size = env.get_l1_size();
+        const auto props = env.get_device_properties();
+        auto arch = props.arch();
+        auto l1_size = props.l1_size();
         auto num_devices = env.get_num_available_devices();
         log_info(tt::LogTest, "Pre-fork: arch={}, L1 size={}, num_devices={}", arch, l1_size, num_devices);
         EXPECT_GT(l1_size, 0u);
@@ -697,7 +698,7 @@ TEST(MetalContextIntegrationTest, ForkMockAndRealDevice) {
             _exit(1);
         }
 
-        if (mock_env.get_arch() != tt::ARCH::BLACKHOLE) {
+        if (mock_env.get_device_properties().arch() != tt::ARCH::BLACKHOLE) {
             _exit(2);
         }
 
@@ -721,8 +722,9 @@ TEST(MetalContextIntegrationTest, ForkMockAndRealDevice) {
 
     MetalEnv env;
 
-    auto real_arch = env.get_arch();
-    auto real_l1_size = env.get_l1_size();
+    const auto real_props = env.get_device_properties();
+    auto real_arch = real_props.arch();
+    auto real_l1_size = real_props.l1_size();
     log_info(tt::LogTest, "Parent (real): arch={}, L1 size={}", real_arch, real_l1_size);
     EXPECT_GT(real_l1_size, 0u);
 
