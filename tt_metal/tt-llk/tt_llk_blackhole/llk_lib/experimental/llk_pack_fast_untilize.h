@@ -75,6 +75,9 @@ namespace ckernel
 // Chunk width the pack init was programmed for (0 after the uninit); written and read only under LLK asserts.
 inline std::uint32_t pack_fast_untilize_init_block_ct_dim = 0;
 
+// The unit the pack MOP is programmed for (a pass unit with FAST_UNTILIZE_PASS_MOP_KEY), kept across block calls.
+inline std::uint32_t pack_fast_untilize_mop_key = 0;
+
 template <bool is_strided_row>
 inline void _llk_pack_fast_untilize_configure_addrmod_()
 {
@@ -573,9 +576,27 @@ inline void _llk_pack_fast_untilize_pass_block_strided_(
     _llk_pack_fast_untilize_restore_pack_counters_<true>();
 }
 
+// Programs the MOP for the first unit of a whole-row init, so block calls of that unit keep it.
+template <std::uint32_t block_ct_dim, std::uint32_t full_ct_dim>
+inline void _llk_pack_fast_untilize_init_mop_()
+{
+    pack_fast_untilize_mop_key = 0;
+    if constexpr (full_ct_dim <= block_ct_dim && block_ct_dim == FAST_UNTILIZE_MAX_PASS_UNIT_DIM)
+    {
+        _llk_pack_fast_untilize_pass_mop_config_(full_ct_dim, FAST_UNTILIZE_PHASE_ROWS, false);
+        pack_fast_untilize_mop_key = full_ct_dim | FAST_UNTILIZE_PASS_MOP_KEY;
+    }
+    else if constexpr (full_ct_dim <= block_ct_dim && full_ct_dim >= 2)
+    {
+        _llk_pack_fast_untilize_mop_config_<block_ct_dim>(full_ct_dim, false, FAST_UNTILIZE_PHASE_ROWS - 1);
+        pack_fast_untilize_mop_key = full_ct_dim;
+    }
+}
+
 inline void _llk_pack_fast_untilize_uninit_(const std::uint32_t pack_src_format)
 {
     LLK_ASSERT_BLOCK(pack_fast_untilize_init_block_ct_dim = 0);
+    pack_fast_untilize_mop_key = 0;
     // set_packer_strides also zeroes the channel-1 Y stride the strided path programs.
     set_packer_strides<PackMode::Default>(pack_src_format, TILE_C_DIM);
     // init owns the X counter and sets it itself; strides are restored just above, so skip them in init.

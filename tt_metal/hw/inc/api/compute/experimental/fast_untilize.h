@@ -142,6 +142,7 @@ ALWI void fast_untilize_block(
         constexpr std::uint32_t first_unit_dim = fast_untilize_first_pass_unit(full_ct_dim);
         [[maybe_unused]] std::uint32_t prev_unpack_unit_dim = first_unit_dim | FAST_UNTILIZE_PASS_MOP_KEY;
         [[maybe_unused]] std::uint32_t prev_pack_unit_dim = 0;
+        PACK((prev_pack_unit_dim = ckernel::pack_fast_untilize_mop_key));
 
         for (std::uint32_t tiles_done = 0; tiles_done < full_ct_dim;) {
             const std::uint32_t unit_dim = fast_untilize_next_pass_row_unit(full_ct_dim - tiles_done);
@@ -174,6 +175,7 @@ ALWI void fast_untilize_block(
         }
 
         UNPACK((llk_unpack_fast_untilize_pass_restore_unit_dim(first_unit_dim, prev_unpack_unit_dim)));
+        PACK((ckernel::pack_fast_untilize_mop_key = prev_pack_unit_dim));
         return;
     }
 
@@ -196,6 +198,7 @@ ALWI void fast_untilize_block(
         constexpr std::uint32_t first_unpack_unit_dim = fast_untilize_next_unit_dim<max_unit_dim>(full_ct_dim);
         [[maybe_unused]] std::uint32_t prev_unpack_unit_dim = first_unpack_unit_dim;
         [[maybe_unused]] std::uint32_t prev_pack_unit_dim = 0;
+        PACK((prev_pack_unit_dim = ckernel::pack_fast_untilize_mop_key));
 
         while (tiles_done < full_ct_dim) {
             const std::uint32_t remaining_tiles = full_ct_dim - tiles_done;
@@ -218,6 +221,7 @@ ALWI void fast_untilize_block(
         // Preserve the init-time first-unit MOP invariant for the next stateless block call.
         UNPACK((llk_unpack_fast_untilize_restore_unit_dim<is_fp32_dest_acc_en>(
             icb, first_unpack_unit_dim, prev_unpack_unit_dim)));
+        PACK((ckernel::pack_fast_untilize_mop_key = prev_pack_unit_dim));
     }
 #else
     pack_untilize_block<full_ct_dim, full_ct_dim, is_fp32_dest_acc_en>(icb, 1, ocb, 0);
