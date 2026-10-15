@@ -3123,7 +3123,6 @@ tt::tt_metal::ProgramDescriptor build_ring_joint_sdpa_program_descriptor(
     for (auto* kernel : {&reader_kernel, &writer_kernel, &compute_kernel}) {
         kernel->named_compile_time_args = ksplit_named_args;
     }
-    // The reader and compute take it as positional compile-time args 40 and 46.
     writer_kernel.named_compile_time_args.emplace_back("circular_kv_slab_count", circular_kv_slab_count);
     reader_kernel.named_compile_time_args.emplace_back(
         "k_row_Wt", input_tensor_k.padded_shape()[3] / tt::constants::TILE_WIDTH);
