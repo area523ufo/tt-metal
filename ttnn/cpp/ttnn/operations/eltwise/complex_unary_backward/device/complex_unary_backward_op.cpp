@@ -94,35 +94,33 @@ std::vector<ComplexTensor> _angle_bw(
     std::vector<ComplexTensor> grad_tensor;
     const Tensor& inp_r = input.real();
     const Tensor& inp_i = input.imag();
-    Tensor condition_zero = ttnn::logical_and(
-        ttnn::eqz(input.real(), output_mem_config),
-        ttnn::eqz(input.imag(), output_mem_config),
-        std::nullopt,
-        output_mem_config);
-    Tensor abs_squared = ttnn::reciprocal(
-        ttnn::add(
-            ttnn::square(inp_r, output_mem_config),
-            ttnn::square(inp_i, output_mem_config),
-            std::nullopt,
-            output_mem_config),
-        output_mem_config);
+    using ttnn::operations::unary::EltwiseUnaryWithParam;
+    using ttnn::operations::unary::UnaryOpType;
+    const std::array is_zero = {EltwiseUnaryWithParam{UnaryOpType::EQZ}};
+    const std::array negate_it = {EltwiseUnaryWithParam{UnaryOpType::NEG}};
+    Tensor condition_zero =
+        ttnn::logical_and(inp_r, inp_i, std::nullopt, output_mem_config, std::nullopt, {}, is_zero, is_zero);
+    // Evaluate grad * (-y, x) / (x^2 + y^2) via inv_r = 1 / hypot(x, y) without forming
+    // x^2 + y^2 directly, which overflows above |z| = 2^64 and underflows below |z| = 2^-63.
+    Tensor inv_r = ttnn::reciprocal(ttnn::hypot(inp_r, inp_i, output_mem_config), output_mem_config);
+    Tensor u_r = ttnn::multiply(inp_r, inv_r, std::nullopt, output_mem_config);
+    Tensor neg_u_i = ttnn::multiply(inp_i, inv_r, std::nullopt, output_mem_config, std::nullopt, {}, negate_it);
+    Tensor grad_over_r = ttnn::multiply(grad, inv_r, std::nullopt, output_mem_config);
+    inv_r.deallocate();
     Tensor res_real = ttnn::where(
         condition_zero,
         0.0f,
-        ttnn::multiply(
-            grad,
-            ttnn::multiply(ttnn::neg(inp_i, output_mem_config), abs_squared, std::nullopt, output_mem_config),
-            std::nullopt,
-            output_mem_config),
+        ttnn::multiply(grad_over_r, neg_u_i, std::nullopt, output_mem_config),
         output_mem_config);
+    neg_u_i.deallocate();
     Tensor res_imag = ttnn::where(
         condition_zero,
         0.0f,
-        ttnn::multiply(
-            grad, ttnn::multiply(inp_r, abs_squared, std::nullopt, output_mem_config), std::nullopt, output_mem_config),
+        ttnn::multiply(grad_over_r, u_r, std::nullopt, output_mem_config),
         output_mem_config);
+    u_r.deallocate();
+    grad_over_r.deallocate();
     condition_zero.deallocate();
-    abs_squared.deallocate();
     ComplexTensor grad_result = ComplexTensor({res_real, res_imag});
     res_real.deallocate();
     res_imag.deallocate();
