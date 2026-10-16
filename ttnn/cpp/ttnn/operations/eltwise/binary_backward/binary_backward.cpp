@@ -663,11 +663,24 @@ std::vector<Tensor> bias_gelu_bw(
     operations::unary::GeluVariant variant,
     const std::optional<MemoryConfig>& output_mem_config) {
     std::vector<Tensor> grad_tensor_res;
-    Tensor input = ttnn::add(input_a, input_b);
-    std::vector<std::optional<Tensor>> gelu_result = ttnn::gelu_bw(grad_tensor, input, variant, output_mem_config);
+    const auto mc_a = output_mem_config.value_or(input_a.memory_config());
+    const auto mc_b = output_mem_config.value_or(input_b.memory_config());
+    Tensor input = ttnn::add(input_a, input_b, std::nullopt, mc_a);
+    std::vector<std::optional<Tensor>> gelu_result = ttnn::gelu_bw(grad_tensor, input, variant, mc_a);
+    input.deallocate();
     if (gelu_result[0].has_value()) {
-        grad_tensor_res.push_back(gelu_result[0].value());
-        grad_tensor_res.push_back(gelu_result[0].value());
+        const Tensor& d_gelu = gelu_result[0].value();
+        Tensor grad_a =
+            operations::binary_backward::detail::reduce_grad_to_operand_shape(d_gelu, input_a.logical_shape(), mc_a);
+        Tensor grad_b =
+            operations::binary_backward::detail::reduce_grad_to_operand_shape(d_gelu, input_b.logical_shape(), mc_b);
+        if (grad_a.buffer() == grad_b.buffer()) {
+            Tensor grad_b_copy = ttnn::empty_like(input_b, std::nullopt, std::nullopt, std::nullopt, mc_b);
+            ttnn::assign(grad_b, grad_b_copy);
+            grad_b = std::move(grad_b_copy);
+        }
+        grad_tensor_res.push_back(std::move(grad_a));
+        grad_tensor_res.push_back(std::move(grad_b));
     }
     return grad_tensor_res;
 }
@@ -679,8 +692,10 @@ std::vector<Tensor> bias_gelu_bw(
     operations::unary::GeluVariant variant,
     const std::optional<MemoryConfig>& output_mem_config) {
     std::vector<Tensor> grad_tensor_res;
-    Tensor input = ttnn::add(input_tensor, bias);
-    std::vector<std::optional<Tensor>> gelu_result = ttnn::gelu_bw(grad_tensor, input, variant, output_mem_config);
+    const auto mc = output_mem_config.value_or(input_tensor.memory_config());
+    Tensor input = ttnn::add(input_tensor, bias, std::nullopt, mc);
+    std::vector<std::optional<Tensor>> gelu_result = ttnn::gelu_bw(grad_tensor, input, variant, mc);
+    input.deallocate();
     if (gelu_result[0].has_value()) {
         grad_tensor_res.push_back(gelu_result[0].value());
     }
